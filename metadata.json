@@ -1,0 +1,6 @@
+{
+  "name": "Cuango Fleet BI",
+  "description": "Plataforma automatizada de análise de frotas GPS (Entradas/Saídas de Áreas) com métricas por equipamento, condutor e turno de trabalho integradas ao Power BI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
