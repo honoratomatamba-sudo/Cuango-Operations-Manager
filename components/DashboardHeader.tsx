@@ -3,7 +3,9 @@
 import { useState } from 'react';
 import Image from 'next/image';
 import {
+  Compass,
   DatabaseZap,
+  Factory,
   FileBarChart2,
   KeyRound,
   LayoutDashboard,
@@ -17,6 +19,7 @@ import {
 } from 'lucide-react';
 import { PublicUser, USER_ROLE_LABELS } from '@/lib/auth-types';
 import { OFFICIAL_REPORT_FOOTER } from '@/lib/fleet-analytics';
+import { FleetModuleId } from '@/lib/fleet-types';
 
 export type ActiveTab =
   | 'overview'
@@ -27,6 +30,8 @@ export type ActiveTab =
   | 'users';
 
 interface DashboardSidebarProps {
+  activeModule: FleetModuleId;
+  onModuleChange: (mod: FleetModuleId) => void;
   activeTab: ActiveTab;
   onTabChange: (tab: ActiveTab) => void;
   onOpenUpload: () => void;
@@ -36,16 +41,29 @@ interface DashboardSidebarProps {
   onLogout: () => void;
 }
 
-const TAB_TITLES: Record<ActiveTab, string> = {
-  overview: 'Visão Geral Operacional',
-  reports: 'Área de Relatórios',
-  shifts_drivers: 'Turnos e Condutores',
-  cycles: 'Registos e Ciclos',
-  powerbi: 'Automação Gmail & Power BI',
-  users: 'Gestão de Usuários e Senhas',
-};
+function getTabTitle(activeTab: ActiveTab, activeModule: FleetModuleId): string {
+  if (activeTab === 'overview') {
+    return activeModule === 'exploracao'
+      ? 'EXPLORAÇÃO — Optimização das Operações & Combustível (L/h)'
+      : 'METALURGIA — Visão Geral Operacional';
+  }
+  if (activeTab === 'reports') {
+    return activeModule === 'exploracao'
+      ? 'Relatórios · Módulo EXPLORAÇÃO'
+      : 'Relatórios · Módulo METALURGIA';
+  }
+  const map: Record<Exclude<ActiveTab, 'overview' | 'reports'>, string> = {
+    shifts_drivers: 'Turnos e Condutores',
+    cycles: 'Registos e Ciclos',
+    powerbi: 'Automação Gmail & Power BI',
+    users: 'Gestão de Usuários e Senhas',
+  };
+  return map[activeTab];
+}
 
 export function DashboardSidebar({
+  activeModule,
+  onModuleChange,
   activeTab,
   onTabChange,
   onOpenUpload,
@@ -63,7 +81,11 @@ export function DashboardSidebar({
     label: string;
     icon: typeof LayoutDashboard;
   }> = [
-    { id: 'overview', label: 'Visão Geral', icon: LayoutDashboard },
+    {
+      id: 'overview',
+      label: activeModule === 'exploracao' ? 'Optimização & L/h' : 'Visão Geral',
+      icon: LayoutDashboard,
+    },
     { id: 'reports', label: 'Relatórios', icon: FileBarChart2 },
     { id: 'shifts_drivers', label: 'Turnos e Condutores', icon: Users },
     { id: 'cycles', label: `Registos (${totalRecords})`, icon: Table2 },
@@ -75,6 +97,11 @@ export function DashboardSidebar({
 
   const handleSelect = (tab: ActiveTab) => {
     onTabChange(tab);
+    setMobileOpen(false);
+  };
+
+  const handleSwitchModule = (mod: FleetModuleId) => {
+    onModuleChange(mod);
     setMobileOpen(false);
   };
 
@@ -100,8 +127,43 @@ export function DashboardSidebar({
           </button>
         </div>
 
+        {/* Dedicated Module Switcher Buttons (METALURGIA | EXPLORAÇÃO) */}
+        <div className="border-b border-orange-100 px-3 py-3 bg-orange-50/25">
+          <p className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Módulos Operacionais
+          </p>
+          <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Selecionar módulo">
+            <button
+              type="button"
+              onClick={() => handleSwitchModule('metalurgia')}
+              aria-pressed={activeModule === 'metalurgia'}
+              className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-[11px] font-bold tracking-wide transition-colors whitespace-nowrap ${
+                activeModule === 'metalurgia'
+                  ? 'bg-orange-600 text-white shadow-xs'
+                  : 'border border-orange-200 bg-white text-slate-700 hover:bg-orange-50'
+              }`}
+            >
+              <Factory className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>METALURGIA</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSwitchModule('exploracao')}
+              aria-pressed={activeModule === 'exploracao'}
+              className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-[11px] font-bold tracking-wide transition-colors whitespace-nowrap ${
+                activeModule === 'exploracao'
+                  ? 'bg-orange-600 text-white shadow-xs'
+                  : 'border border-orange-200 bg-white text-slate-700 hover:bg-orange-50'
+              }`}
+            >
+              <Compass className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>EXPLORAÇÃO</span>
+            </button>
+          </div>
+        </div>
+
         {/* Navigation Links */}
-        <nav aria-label="Menu lateral principal" className="px-3 py-5 space-y-1">
+        <nav aria-label="Menu lateral principal" className="px-3 py-4 space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
@@ -190,48 +252,78 @@ export function DashboardSidebar({
   return (
     <>
       {/* Desktop Fixed/Sticky Left Sidebar */}
-      <aside className="hidden lg:flex lg:w-[264px] lg:shrink-0 lg:flex-col lg:sticky lg:top-0 lg:h-screen border-r border-orange-100 bg-white no-print">
+      <aside className="hidden lg:flex lg:w-[272px] lg:shrink-0 lg:flex-col lg:sticky lg:top-0 lg:h-screen border-r border-orange-100 bg-white no-print">
         {renderSidebarBody()}
       </aside>
 
       {/* Mobile Compact Header Bar (<= 15% mobile viewport cap) */}
-      <header className="sticky top-0 z-30 flex lg:hidden items-center justify-between gap-4 border-b border-orange-100 bg-white px-4 py-2.5 no-print">
-        <div className="flex items-center gap-3 min-w-0">
-          <button
-            type="button"
-            onClick={() => setMobileOpen(true)}
-            aria-label="Abrir menu lateral"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-orange-200 bg-white text-slate-700 hover:bg-orange-50 shrink-0"
-          >
-            <Menu className="h-5 w-5 text-orange-600" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelect('overview')}
-            className="shrink-0"
-          >
-            <Image
-              src="/assets/aistudio/image_33e20192.png"
-              alt="Sociedade Mineira do Cuango"
-              width={259}
-              height={68}
-              priority
-              referrerPolicy="no-referrer"
-              className="h-8 w-auto object-contain"
-            />
-          </button>
+      <header className="sticky top-0 z-30 flex lg:hidden flex-col border-b border-orange-100 bg-white no-print">
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setMobileOpen(true)}
+              aria-label="Abrir menu lateral"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-orange-200 bg-white text-slate-700 hover:bg-orange-50 shrink-0"
+            >
+              <Menu className="h-5 w-5 text-orange-600" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelect('overview')}
+              className="shrink-0"
+            >
+              <Image
+                src="/assets/aistudio/image_33e20192.png"
+                alt="Sociedade Mineira do Cuango"
+                width={259}
+                height={68}
+                priority
+                referrerPolicy="no-referrer"
+                className="h-8 w-auto object-contain"
+              />
+            </button>
+          </div>
+
+          {canUpload && (
+            <button
+              type="button"
+              onClick={onOpenUpload}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-700 whitespace-nowrap shrink-0"
+            >
+              <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Importar PDF</span>
+            </button>
+          )}
         </div>
 
-        {canUpload && (
+        {/* Mobile Quick Module Switcher Buttons */}
+        <div className="grid grid-cols-2 gap-2 border-t border-orange-100 bg-orange-50/30 px-4 py-2">
           <button
             type="button"
-            onClick={onOpenUpload}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-orange-700 whitespace-nowrap shrink-0"
+            onClick={() => handleSwitchModule('metalurgia')}
+            className={`inline-flex items-center justify-center gap-1.5 rounded-md py-1.5 text-[11px] font-bold ${
+              activeModule === 'metalurgia'
+                ? 'bg-orange-600 text-white'
+                : 'border border-orange-200 bg-white text-slate-700'
+            }`}
           >
-            <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Importar PDF</span>
+            <Factory className="h-3 w-3" aria-hidden="true" />
+            <span>METALURGIA</span>
           </button>
-        )}
+          <button
+            type="button"
+            onClick={() => handleSwitchModule('exploracao')}
+            className={`inline-flex items-center justify-center gap-1.5 rounded-md py-1.5 text-[11px] font-bold ${
+              activeModule === 'exploracao'
+                ? 'bg-orange-600 text-white'
+                : 'border border-orange-200 bg-white text-slate-700'
+            }`}
+          >
+            <Compass className="h-3 w-3" aria-hidden="true" />
+            <span>EXPLORAÇÃO</span>
+          </button>
+        </div>
       </header>
 
       {/* Mobile Slide-Out Sidebar Drawer */}
@@ -246,7 +338,7 @@ export function DashboardSidebar({
             onClick={() => setMobileOpen(false)}
             className="fixed inset-0 bg-slate-900/35 backdrop-blur-xs"
           />
-          <div className="relative z-10 flex w-[272px] max-w-[82vw] flex-col bg-white shadow-xl border-r border-orange-100">
+          <div className="relative z-10 flex w-[278px] max-w-[84vw] flex-col bg-white shadow-xl border-r border-orange-100">
             <button
               type="button"
               onClick={() => setMobileOpen(false)}
@@ -264,22 +356,64 @@ export function DashboardSidebar({
 }
 
 interface WorkspaceTopBarProps {
+  activeModule: FleetModuleId;
+  onModuleChange: (mod: FleetModuleId) => void;
   activeTab: ActiveTab;
   onOpenUpload: () => void;
   canUpload?: boolean;
 }
 
 export function WorkspaceTopBar({
+  activeModule,
+  onModuleChange,
   activeTab,
   onOpenUpload,
   canUpload = true,
 }: WorkspaceTopBarProps) {
   return (
-    <div className="hidden lg:flex items-center justify-between gap-8 border-b border-orange-100 bg-white px-8 py-3.5 no-print">
-      <div className="flex items-center gap-2 text-sm text-slate-500 whitespace-nowrap shrink-0">
-        <span className="font-medium text-slate-600">Sociedade Mineira do Cuango</span>
-        <span aria-hidden="true">/</span>
-        <span className="font-semibold text-slate-900">{TAB_TITLES[activeTab]}</span>
+    <div className="hidden lg:flex items-center justify-between gap-6 border-b border-orange-100 bg-white px-8 py-3.5 no-print">
+      <div className="flex items-center gap-4 min-w-0">
+        {/* Top Bar Segmented Module Buttons */}
+        <div
+          role="group"
+          aria-label="Módulos Operacionais"
+          className="inline-flex items-center gap-1 rounded-lg border border-orange-200 bg-orange-50/40 p-1 shrink-0"
+        >
+          <button
+            type="button"
+            onClick={() => onModuleChange('metalurgia')}
+            aria-pressed={activeModule === 'metalurgia'}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold tracking-wide transition-colors whitespace-nowrap ${
+              activeModule === 'metalurgia'
+                ? 'bg-orange-600 text-white shadow-xs'
+                : 'text-slate-600 hover:bg-white hover:text-slate-900'
+            }`}
+          >
+            <Factory className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>METALURGIA</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onModuleChange('exploracao')}
+            aria-pressed={activeModule === 'exploracao'}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold tracking-wide transition-colors whitespace-nowrap ${
+              activeModule === 'exploracao'
+                ? 'bg-orange-600 text-white shadow-xs'
+                : 'text-slate-600 hover:bg-white hover:text-slate-900'
+            }`}
+          >
+            <Compass className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>EXPLORAÇÃO</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 text-sm text-slate-500 whitespace-nowrap truncate">
+          <span className="font-medium text-slate-600">Sociedade Mineira do Cuango</span>
+          <span aria-hidden="true">/</span>
+          <span className="font-semibold text-slate-900 truncate">
+            {getTabTitle(activeTab, activeModule)}
+          </span>
+        </div>
       </div>
 
       {canUpload && (

@@ -14,13 +14,14 @@ import {
   generateDAXMeasures,
   generatePowerQueryM,
 } from '@/lib/fleet-analytics';
-import { FleetDataset, ShiftScheme } from '@/lib/fleet-types';
+import { FleetDataset, FleetModuleId, ShiftScheme } from '@/lib/fleet-types';
 import {
   GmailInboxSyncPanel,
   GmailSyncController,
 } from './GmailInboxSyncPanel';
 
 interface PowerBiAutomationViewProps {
+  activeModule: FleetModuleId;
   dataset: FleetDataset;
   filteredCount: number;
   totalEntradas: number;
@@ -36,6 +37,7 @@ interface PowerBiAutomationViewProps {
 }
 
 export function PowerBiAutomationView({
+  activeModule,
   dataset,
   filteredCount,
   totalEntradas,
@@ -54,7 +56,7 @@ export function PowerBiAutomationView({
 
   const origin =
     typeof window !== 'undefined' ? window.location.origin : 'https://seu-dominio.app';
-  const feedUrl = `${origin}/api/powerbi/feed?turnoModelo=${shiftScheme}`;
+  const feedUrl = `${origin}/api/powerbi/feed?modulo=${activeModule}&turnoModelo=${shiftScheme}`;
   const mScript = generatePowerQueryM(feedUrl);
   const daxMeasures = generateDAXMeasures();
 
@@ -109,7 +111,11 @@ export function PowerBiAutomationView({
               className="inline-flex items-center gap-1.5 rounded-md border border-orange-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-orange-50 whitespace-nowrap shrink-0"
             >
               <RotateCcw className="h-3.5 w-3.5 text-orange-600" aria-hidden="true" />
-              <span>Repor PDF Original (14/11/2026)</span>
+              <span>
+                {activeModule === 'exploracao'
+                  ? 'Repor PDF Exploração (15/11/2026)'
+                  : 'Repor PDF Metalurgia (14/11/2026)'}
+              </span>
             </button>
           </div>
         </div>

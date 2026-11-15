@@ -202,7 +202,7 @@ export function SlicerBar({
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    {opt.label.replace('Turno ', '')}
+                    {opt.label}
                   </button>
                 );
               })}

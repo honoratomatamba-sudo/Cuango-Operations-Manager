@@ -3,7 +3,10 @@
 import { useState } from 'react';
 import { FileUp, Loader2, X } from 'lucide-react';
 
+import { FleetModuleId } from '@/lib/fleet-types';
+
 interface PdfUploadModalProps {
+  activeModule?: FleetModuleId;
   open: boolean;
   isUploading: boolean;
   error: string | null;
@@ -12,6 +15,7 @@ interface PdfUploadModalProps {
 }
 
 export function PdfUploadModal({
+  activeModule = 'metalurgia',
   open,
   isUploading,
   error,
@@ -40,10 +44,13 @@ export function PdfUploadModal({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 id="upload-modal-title" className="text-base font-semibold text-slate-900">
-              Importar Relatório PDF de Frota
+              Importar Relatório PDF · Módulo{' '}
+              <span className="text-orange-700">
+                {activeModule === 'exploracao' ? 'EXPLORAÇÃO' : 'METALURGIA'}
+              </span>
             </h2>
             <p className="mt-1 text-xs text-slate-500">
-              Selecione um PDF do sistema Novatronica (Entradas/Saídas de Áreas) para extração automática.
+              Selecione um PDF do sistema Novatronica (Entradas/Saídas de Áreas) para extração automática. Relatórios de Exploração ou Metalurgia são encaminhados automaticamente.
             </p>
           </div>
           <button

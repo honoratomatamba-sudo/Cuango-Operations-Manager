@@ -158,3 +158,74 @@ export interface HourlyBucket {
   paradoSeg: number;
   eficienciaPct: number;
 }
+
+export type FleetModuleId = 'metalurgia' | 'exploracao';
+
+export interface FuelRatePair {
+  operacaoLh: number;
+  relantiLh: number;
+}
+
+export interface EquipmentFuelProfile extends FuelRatePair {
+  equipamento: string;
+  categoria: string;
+}
+
+export interface FuelGlobalKPIs {
+  horasOperacaoEfetiva: number;
+  horasRelanti: number;
+  horasUtilizacaoTotal: number;
+  combustivelOperacaoLitros: number;
+  combustivelRelantiLitros: number;
+  combustivelTotalLitros: number;
+  taxaMediaOperacaoLh: number;
+  taxaMediaRelantiLh: number;
+  consumoMedioUtilizacaoLh: number;
+  pctDesperdicioRelanti: number;
+  economiaPotencialLitros: number;
+}
+
+export interface ExplorationEquipmentMetric {
+  equipamento: string;
+  categoria: string;
+  entradas: number;
+  areas: string[];
+  condutores: string[];
+  permanenciaSeg: number;
+  utilizacaoSeg: number;
+  produtivoSeg: number;
+  relantiSeg: number;
+  paradoSeg: number;
+  distanciaHoras: number;
+  eficienciaEfetivaPct: number;
+  taxaRelantiSobreUtilizacaoPct: number;
+  taxaParadoPct: number;
+  operacaoLh: number;
+  relantiLh: number;
+  combustivelOperacaoLitros: number;
+  combustivelRelantiLitros: number;
+  combustivelTotalLitros: number;
+  consumoMedioUtilizacaoLh: number;
+  pctDesperdicioCombustivel: number;
+  nivelOtimizacao: 'Otimizado' | 'Atenção' | 'Crítico';
+}
+
+export interface ExplorationAreaMetric {
+  area: string;
+  entradas: number;
+  equipamentosCount: number;
+  equipamentos: string[];
+  condutoresCount: number;
+  permanenciaSeg: number;
+  utilizacaoSeg: number;
+  produtivoSeg: number;
+  relantiSeg: number;
+  paradoSeg: number;
+  mediaCicloSeg: number;
+  eficienciaEfetivaPct: number;
+  taxaRelantiSobreUtilizacaoPct: number;
+  combustivelOperacaoLitros: number;
+  combustivelRelantiLitros: number;
+  combustivelTotalLitros: number;
+}
+

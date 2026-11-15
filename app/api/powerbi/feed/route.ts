@@ -4,19 +4,25 @@ import {
   getEntryCount,
   getShiftMeta,
   OFFICIAL_REPORT_FOOTER,
+  resolveFuelProfile,
 } from '@/lib/fleet-analytics';
-import { FleetDataset, ShiftScheme } from '@/lib/fleet-types';
+import { FleetDataset, FleetModuleId, ShiftScheme } from '@/lib/fleet-types';
 import { getActiveServerDataset, setActiveServerDataset } from '@/lib/server-store';
+
+function resolveModuleId(raw: string | null | undefined): FleetModuleId {
+  return raw === 'exploracao' ? 'exploracao' : 'metalurgia';
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
+  const moduleId = resolveModuleId(searchParams.get('modulo'));
   const schemeParam = searchParams.get('turnoModelo');
   const scheme: ShiftScheme = schemeParam === '2x12h' ? '2x12h' : '3x8h';
   const areaFilter = searchParams.get('area');
   const equipFilter = searchParams.get('equipamento');
   const detailMode = searchParams.get('detalhe') === 'lista';
 
-  const dataset = getActiveServerDataset();
+  const dataset = getActiveServerDataset(moduleId);
   const baseRows =
     detailMode && dataset.detailCycles && dataset.detailCycles.length > 0
       ? dataset.detailCycles
@@ -30,8 +36,18 @@ export async function GET(req: NextRequest) {
 
   const enrichedRecords = filtered.map((r) => {
     const shift = getShiftMeta(r.horaEntrada, scheme);
+    const fuel =
+      moduleId === 'exploracao' ? resolveFuelProfile(r.equipamento) : null;
+    const combustivelOperacaoL = fuel
+      ? Number(((r.produtivoSeg / 3600) * fuel.operacaoLh).toFixed(2))
+      : undefined;
+    const combustivelRelantiL = fuel
+      ? Number(((r.relantiSeg / 3600) * fuel.relantiLh).toFixed(2))
+      : undefined;
+
     return {
       numero: r.numero,
+      modulo: moduleId,
       data: r.data,
       horaEntrada: r.horaEntrada,
       turno: shift.label,
@@ -59,6 +75,17 @@ export async function GET(req: NextRequest) {
       distanciaHoras: r.distanciaHoras,
       eficienciaEfetivaPct:
         r.duracaoSeg > 0 ? Number(((r.produtivoSeg / r.duracaoSeg) * 100).toFixed(2)) : 0,
+      ...(fuel
+        ? {
+            taxaOperacaoLh: fuel.operacaoLh,
+            taxaRelantiLh: fuel.relantiLh,
+            combustivelOperacaoL,
+            combustivelRelantiL,
+            combustivelTotalL: Number(
+              ((combustivelOperacaoL ?? 0) + (combustivelRelantiL ?? 0)).toFixed(2)
+            ),
+          }
+        : {}),
       fonteSecao: r.sourceSection ?? 'resumo',
       arquivoOrigem: r.origemArquivo ?? dataset.metadata.arquivoOrigem,
     };
@@ -66,7 +93,8 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json(
     {
-      schemaVersion: '1.1',
+      schemaVersion: '1.2',
+      modulo: moduleId,
       organizacao: dataset.metadata.organizacao,
       periodo: `${dataset.metadata.dataInicio} - ${dataset.metadata.dataFim}`,
       modeloTurno: scheme,
@@ -87,12 +115,20 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as { dataset?: FleetDataset };
+    const body = (await req.json()) as {
+      dataset?: FleetDataset;
+      moduleId?: FleetModuleId;
+    };
     if (!body.dataset || !Array.isArray(body.dataset.records)) {
       return NextResponse.json({ error: 'Payload inválido.' }, { status: 400 });
     }
-    setActiveServerDataset(body.dataset);
-    return NextResponse.json({ ok: true, total: body.dataset.records.length });
+    const moduleId = resolveModuleId(body.moduleId);
+    setActiveServerDataset(body.dataset, moduleId);
+    return NextResponse.json({
+      ok: true,
+      moduleId,
+      total: body.dataset.records.length,
+    });
   } catch {
     return NextResponse.json({ error: 'Erro ao sincronizar feed.' }, { status: 400 });
   }

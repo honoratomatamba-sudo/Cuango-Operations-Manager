@@ -8,6 +8,7 @@ import {
 import {
   FleetCycleRecord,
   FleetDataset,
+  FleetModuleId,
   ReportMetadata,
 } from './fleet-types';
 
@@ -127,13 +128,16 @@ export interface SupabaseFleetRecordRow {
 
 export function serializeWorkspaceRow(
   metadata: ReportMetadata,
-  autoSyncEnabled?: boolean
+  autoSyncEnabled?: boolean,
+  moduleId: FleetModuleId = 'metalurgia'
 ): Record<string, unknown> {
   const row: Record<string, unknown> = {
-    id: 'default',
+    id: moduleId === 'exploracao' ? 'exploracao' : 'default',
     organizacao: metadata.organizacao || 'SOCMINEIRACUANGO',
     sistema: metadata.sistema || 'Novatronica Gestão de Frotas por GPS',
-    grupo_equipamentos: metadata.grupoEquipamentos || 'Pesados Metalurgia',
+    grupo_equipamentos:
+      metadata.grupoEquipamentos ||
+      (moduleId === 'exploracao' ? 'Pesados Exploração' : 'Pesados Metalurgia'),
     equipamentos_no_filtro: Array.from(
       new Set(metadata.equipamentosNoFiltro ?? [])
     ),
@@ -160,14 +164,29 @@ export function serializeWorkspaceRow(
 
 export function serializeFleetRecordRow(
   r: FleetCycleRecord,
-  section: 'resumo' | 'lista'
+  section: 'resumo' | 'lista',
+  moduleId: FleetModuleId = 'metalurgia'
 ): SupabaseFleetRecordRow {
   const normalized: FleetCycleRecord = { ...r, sourceSection: section };
-  const fingerprint = getRecordFingerprint(normalized);
-  const id = `${section === 'resumo' ? 'res' : 'lst'}_${hashFingerprint(fingerprint)}`;
+  const baseFingerprint = getRecordFingerprint(normalized);
+  const fingerprint =
+    moduleId === 'exploracao' ? `exp|${baseFingerprint}` : baseFingerprint;
+  const prefix =
+    moduleId === 'exploracao'
+      ? section === 'resumo'
+        ? 'exp_res'
+        : 'exp_lst'
+      : section === 'resumo'
+      ? 'res'
+      : 'lst';
+  const id = `${prefix}_${hashFingerprint(fingerprint)}`;
+  const rawRecordId = (r.id || '').replace(/^exp::/, '');
+  const recordId =
+    moduleId === 'exploracao' ? `exp::${rawRecordId}` : rawRecordId;
+
   return {
     id,
-    record_id: r.id,
+    record_id: recordId,
     source_section: section,
     numero: Math.max(0, Math.trunc(r.numero || 0)),
     equipamento: r.equipamento || 'N/D',
@@ -194,7 +213,10 @@ export function serializeFleetRecordRow(
   };
 }
 
-export function serializeReportFiles(dataset: FleetDataset) {
+export function serializeReportFiles(
+  dataset: FleetDataset,
+  moduleId: FleetModuleId = 'metalurgia'
+) {
   const clean = deduplicateDataset(dataset).dataset;
   const files = (clean.metadata.arquivoOrigem || '')
     .split(' + ')
@@ -210,7 +232,10 @@ export function serializeReportFiles(dataset: FleetDataset) {
       (c) => !c.origemArquivo || c.origemArquivo === fileName
     );
     return {
-      id: `rep_${hashFingerprint(canonical)}`,
+      id:
+        moduleId === 'exploracao'
+          ? `rep_exp_${hashFingerprint(canonical)}`
+          : `rep_${hashFingerprint(canonical)}`,
       file_name: fileName,
       canonical_name: canonical,
       area_selecionada: clean.metadata.areaSelecionada || 'N/D',
@@ -253,7 +278,7 @@ export function deserializeFleetRecordRow(
   row: SupabaseFleetRecordRow
 ): FleetCycleRecord {
   return {
-    id: row.record_id || row.id,
+    id: (row.record_id || row.id).replace(/^exp::/, ''),
     numero: row.numero,
     equipamento: row.equipamento,
     condutorCompleto: row.condutor_completo,

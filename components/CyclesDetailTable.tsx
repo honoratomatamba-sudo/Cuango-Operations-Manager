@@ -256,7 +256,7 @@ export function CyclesDetailTable({
                     </td>
                     {effectiveSection === 'lista' && (
                       <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
-                        {shift.label.replace('Turno ', '')}
+                        {shift.label}
                       </td>
                     )}
                     <td className="py-2.5 px-3 font-mono text-slate-700 tabular-nums whitespace-nowrap">

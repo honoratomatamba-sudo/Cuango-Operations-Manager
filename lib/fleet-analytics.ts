@@ -1,9 +1,15 @@
 import {
   DriverMetrics,
   EquipmentAreaMetrics,
+  EquipmentFuelProfile,
+  ExplorationAreaMetric,
+  ExplorationEquipmentMetric,
   FilterState,
   FleetCycleRecord,
   FleetDataset,
+  FleetModuleId,
+  FuelGlobalKPIs,
+  FuelRatePair,
   GlobalKPIs,
   HourlyBucket,
   ShiftId,
@@ -73,24 +79,24 @@ export function getShiftMeta(
     if (hour >= 6 && hour < 18) {
       return {
         id: 'dia_12h',
-        label: 'Turno Dia (12h)',
+        label: '1º Turno (12h)',
         windowLabel: '06:00 – 18:00',
         order: 1,
       };
     }
     return {
       id: 'noite_12h',
-      label: 'Turno Noite (12h)',
+      label: '2º Turno (12h)',
       windowLabel: '18:00 – 06:00',
       order: 2,
     };
   }
 
-  // 3x8h mining shift standard
+  // 3x8h mining shift standard (1º, 2º e 3º Turno)
   if (hour >= 6 && hour < 14) {
     return {
       id: 'manha',
-      label: 'Turno Manhã',
+      label: '1º Turno',
       windowLabel: '06:00 – 14:00',
       order: 1,
     };
@@ -98,14 +104,14 @@ export function getShiftMeta(
   if (hour >= 14 && hour < 22) {
     return {
       id: 'tarde',
-      label: 'Turno Tarde',
+      label: '2º Turno',
       windowLabel: '14:00 – 22:00',
       order: 2,
     };
   }
   return {
     id: 'noite',
-    label: 'Turno Noite',
+    label: '3º Turno',
     windowLabel: '22:00 – 06:00',
     order: 3,
   };
@@ -116,14 +122,14 @@ export function getAllShiftOptions(
 ): Array<{ id: ShiftId; label: string; windowLabel: string; order: number }> {
   if (scheme === '2x12h') {
     return [
-      { id: 'dia_12h', label: 'Turno Dia (12h)', windowLabel: '06:00 – 18:00', order: 1 },
-      { id: 'noite_12h', label: 'Turno Noite (12h)', windowLabel: '18:00 – 06:00', order: 2 },
+      { id: 'dia_12h', label: '1º Turno (12h)', windowLabel: '06:00 – 18:00', order: 1 },
+      { id: 'noite_12h', label: '2º Turno (12h)', windowLabel: '18:00 – 06:00', order: 2 },
     ];
   }
   return [
-    { id: 'manha', label: 'Turno Manhã', windowLabel: '06:00 – 14:00', order: 1 },
-    { id: 'tarde', label: 'Turno Tarde', windowLabel: '14:00 – 22:00', order: 2 },
-    { id: 'noite', label: 'Turno Noite', windowLabel: '22:00 – 06:00', order: 3 },
+    { id: 'manha', label: '1º Turno', windowLabel: '06:00 – 14:00', order: 1 },
+    { id: 'tarde', label: '2º Turno', windowLabel: '14:00 – 22:00', order: 2 },
+    { id: 'noite', label: '3º Turno', windowLabel: '22:00 – 06:00', order: 3 },
   ];
 }
 
@@ -489,6 +495,7 @@ export function generatePowerBICSV(
 
 export type ReportCategory =
   | 'executive'
+  | 'optimization'
   | 'equipment'
   | 'drivers'
   | 'shifts'
@@ -511,6 +518,7 @@ function escapeHtmlCell(val: string | number): string {
 }
 
 export function generateInstitutionalReportCSV(params: {
+  moduleId?: FleetModuleId;
   category: ReportCategory;
   title: string;
   organizacao: string;
@@ -522,8 +530,12 @@ export function generateInstitutionalReportCSV(params: {
   shiftRows: ShiftMetrics[];
   records: FleetCycleRecord[];
   scheme: ShiftScheme;
+  fuelKpis?: FuelGlobalKPIs;
+  explorationEquipRows?: ExplorationEquipmentMetric[];
+  explorationAreaRows?: ExplorationAreaMetric[];
 }): string {
   const {
+    moduleId = 'metalurgia',
     category,
     title,
     organizacao,
@@ -535,24 +547,132 @@ export function generateInstitutionalReportCSV(params: {
     shiftRows,
     records,
     scheme,
+    fuelKpis,
+    explorationEquipRows = [],
+    explorationAreaRows = [],
   } = params;
 
+  const moduleLabel =
+    moduleId === 'exploracao' ? 'Módulo: EXPLORAÇÃO' : 'Módulo: METALURGIA';
+
+  const summaryHeaderCells = [
+    `Entradas: ${kpis.totalEntradas}`,
+    `Permanência: ${formatHMS(kpis.permanenciaSeg)}`,
+    `Operação Motor: ${formatHMS(kpis.utilizacaoSeg)}`,
+    `Trabalho Efetivo: ${formatHMS(kpis.produtivoSeg)}`,
+    `Relanti: ${formatHMS(kpis.relantiSeg)}`,
+    `Eficiência: ${kpis.eficienciaEfetivaPct.toFixed(1).replace('.', ',')}%`,
+  ];
+
+  if (moduleId === 'exploracao' && fuelKpis) {
+    summaryHeaderCells.push(
+      `Combustível Operação: ${fuelKpis.combustivelOperacaoLitros.toFixed(1).replace('.', ',')} L (${fuelKpis.taxaMediaOperacaoLh.toFixed(1).replace('.', ',')} L/h)`,
+      `Combustível Relanti: ${fuelKpis.combustivelRelantiLitros.toFixed(1).replace('.', ',')} L (${fuelKpis.taxaMediaRelantiLh.toFixed(1).replace('.', ',')} L/h)`,
+      `Combustível Total: ${fuelKpis.combustivelTotalLitros.toFixed(1).replace('.', ',')} L`,
+      `Média Motor: ${fuelKpis.consumoMedioUtilizacaoLh.toFixed(1).replace('.', ',')} L/h`
+    );
+  }
+
   const lines: string[] = [
-    [title, organizacao, `Área: ${areaLabel}`, `Período: ${periodo}`]
+    [title, organizacao, moduleLabel, `Área: ${areaLabel}`, `Período: ${periodo}`]
       .map(escapeCsvCell)
       .join(';'),
-    [
-      `Entradas: ${kpis.totalEntradas}`,
-      `Permanência: ${formatHMS(kpis.permanenciaSeg)}`,
-      `Operação Motor: ${formatHMS(kpis.utilizacaoSeg)}`,
-      `Trabalho Efetivo: ${formatHMS(kpis.produtivoSeg)}`,
-      `Relanti: ${formatHMS(kpis.relantiSeg)}`,
-      `Eficiência: ${kpis.eficienciaEfetivaPct.toFixed(1).replace('.', ',')}%`,
-    ]
-      .map(escapeCsvCell)
-      .join(';'),
+    summaryHeaderCells.map(escapeCsvCell).join(';'),
     '',
   ];
+
+  if (
+    moduleId === 'exploracao' &&
+    (category === 'optimization' || category === 'executive')
+  ) {
+    lines.push('OPTIMIZAÇÃO & CONSUMO DE COMBUSTÍVEL POR EQUIPAMENTO (L/h)');
+    lines.push(
+      [
+        'Equipamento',
+        'Categoria',
+        'Entradas',
+        'Permanencia',
+        'Trabalho_Efetivo',
+        'Relanti',
+        'Parado',
+        'Taxa_Operacao_Lh',
+        'Combustivel_Operacao_L',
+        'Taxa_Relanti_Lh',
+        'Combustivel_Relanti_L',
+        'Combustivel_Total_L',
+        'Consumo_Medio_Motor_Lh',
+        'Desperdicio_Relanti_Pct',
+        'Eficiencia_Pct',
+        'Estado_Otimizacao',
+      ].join(';')
+    );
+    for (const eq of explorationEquipRows) {
+      lines.push(
+        [
+          eq.equipamento,
+          eq.categoria,
+          eq.entradas,
+          formatHMS(eq.permanenciaSeg),
+          formatHMS(eq.produtivoSeg),
+          formatHMS(eq.relantiSeg),
+          formatHMS(eq.paradoSeg),
+          eq.operacaoLh.toFixed(1).replace('.', ','),
+          eq.combustivelOperacaoLitros.toFixed(1).replace('.', ','),
+          eq.relantiLh.toFixed(1).replace('.', ','),
+          eq.combustivelRelantiLitros.toFixed(1).replace('.', ','),
+          eq.combustivelTotalLitros.toFixed(1).replace('.', ','),
+          eq.consumoMedioUtilizacaoLh.toFixed(1).replace('.', ','),
+          `${eq.pctDesperdicioCombustivel.toFixed(1).replace('.', ',')}%`,
+          `${eq.eficienciaEfetivaPct.toFixed(1).replace('.', ',')}%`,
+          eq.nivelOtimizacao,
+        ]
+          .map(escapeCsvCell)
+          .join(';')
+      );
+    }
+    lines.push('');
+
+    if (explorationAreaRows.length > 0) {
+      lines.push('DESEMPENHO & GARGALOS POR ÁREA OPERACIONAL');
+      lines.push(
+        [
+          'Area',
+          'Entradas',
+          'Equipamentos',
+          'Permanencia',
+          'Trabalho_Efetivo',
+          'Relanti',
+          'Parado',
+          'Media_Ciclo',
+          'Combustivel_Operacao_L',
+          'Combustivel_Relanti_L',
+          'Combustivel_Total_L',
+          'Eficiencia_Pct',
+        ].join(';')
+      );
+      for (const ar of explorationAreaRows) {
+        lines.push(
+          [
+            ar.area,
+            ar.entradas,
+            ar.equipamentosCount,
+            formatHMS(ar.permanenciaSeg),
+            formatHMS(ar.produtivoSeg),
+            formatHMS(ar.relantiSeg),
+            formatHMS(ar.paradoSeg),
+            formatHMS(ar.mediaCicloSeg),
+            ar.combustivelOperacaoLitros.toFixed(1).replace('.', ','),
+            ar.combustivelRelantiLitros.toFixed(1).replace('.', ','),
+            ar.combustivelTotalLitros.toFixed(1).replace('.', ','),
+            `${ar.eficienciaEfetivaPct.toFixed(1).replace('.', ',')}%`,
+          ]
+            .map(escapeCsvCell)
+            .join(';')
+        );
+      }
+      lines.push('');
+    }
+  }
 
   if (category === 'equipment' || category === 'executive') {
     if (category === 'executive') lines.push('EQUIPAMENTOS POR ÁREA');
@@ -675,6 +795,7 @@ export function generateInstitutionalReportCSV(params: {
 }
 
 export function generateInstitutionalReportExcelHtml(params: {
+  moduleId?: FleetModuleId;
   category: ReportCategory;
   title: string;
   organizacao: string;
@@ -687,8 +808,12 @@ export function generateInstitutionalReportExcelHtml(params: {
   shiftRows: ShiftMetrics[];
   records: FleetCycleRecord[];
   scheme: ShiftScheme;
+  fuelKpis?: FuelGlobalKPIs;
+  explorationEquipRows?: ExplorationEquipmentMetric[];
+  explorationAreaRows?: ExplorationAreaMetric[];
 }): string {
   const {
+    moduleId = 'metalurgia',
     category,
     title,
     organizacao,
@@ -701,13 +826,108 @@ export function generateInstitutionalReportExcelHtml(params: {
     shiftRows,
     records,
     scheme,
+    fuelKpis,
+    explorationEquipRows = [],
+    explorationAreaRows = [],
   } = params;
+
+  const moduleBadgeLabel =
+    moduleId === 'exploracao'
+      ? 'EXPLORAÇÃO — Optimização das Operações'
+      : 'METALURGIA';
 
   const thStyle =
     'background:#EA580C;color:#FFFFFF;font-weight:bold;padding:6px 10px;border:1px solid #FDBA74;text-align:left;';
   const tdStyle = 'padding:5px 10px;border:1px solid #E2E8F0;color:#0F172A;';
 
   const sections: string[] = [];
+
+  if (
+    moduleId === 'exploracao' &&
+    (category === 'optimization' || category === 'executive')
+  ) {
+    sections.push(`
+      <h3 style="color:#9A3412;margin-top:16px;">Consumo de Combustível (L/h) & Optimização por Equipamento</h3>
+      <table style="border-collapse:collapse;width:100%;font-size:12px;">
+        <thead><tr>
+          <th style="${thStyle}">Equipamento</th>
+          <th style="${thStyle}">Categoria</th>
+          <th style="${thStyle}">Entradas</th>
+          <th style="${thStyle}">Trabalho Efetivo</th>
+          <th style="${thStyle}">Relanti</th>
+          <th style="${thStyle}">Parado</th>
+          <th style="${thStyle}">Taxa Oper. (L/h)</th>
+          <th style="${thStyle}">Gasto Oper. (L)</th>
+          <th style="${thStyle}">Taxa Relanti (L/h)</th>
+          <th style="${thStyle}">Gasto Relanti (L)</th>
+          <th style="${thStyle}">Total Comb. (L)</th>
+          <th style="${thStyle}">Média Motor (L/h)</th>
+          <th style="${thStyle}">% Relanti Comb.</th>
+          <th style="${thStyle}">Estado</th>
+        </tr></thead>
+        <tbody>
+          ${explorationEquipRows
+            .map(
+              (eq) => `<tr>
+                <td style="${tdStyle}"><strong>${escapeHtmlCell(eq.equipamento)}</strong></td>
+                <td style="${tdStyle}">${escapeHtmlCell(eq.categoria)}</td>
+                <td style="${tdStyle}">${eq.entradas}</td>
+                <td style="${tdStyle}">${formatHMS(eq.produtivoSeg)}</td>
+                <td style="${tdStyle}">${formatHMS(eq.relantiSeg)}</td>
+                <td style="${tdStyle}">${formatHMS(eq.paradoSeg)}</td>
+                <td style="${tdStyle}">${eq.operacaoLh.toFixed(1).replace('.', ',')}</td>
+                <td style="${tdStyle}">${eq.combustivelOperacaoLitros.toFixed(1).replace('.', ',')}</td>
+                <td style="${tdStyle}">${eq.relantiLh.toFixed(1).replace('.', ',')}</td>
+                <td style="${tdStyle}">${eq.combustivelRelantiLitros.toFixed(1).replace('.', ',')}</td>
+                <td style="${tdStyle}"><strong>${eq.combustivelTotalLitros.toFixed(1).replace('.', ',')}</strong></td>
+                <td style="${tdStyle}">${eq.consumoMedioUtilizacaoLh.toFixed(1).replace('.', ',')}</td>
+                <td style="${tdStyle}">${eq.pctDesperdicioCombustivel.toFixed(1).replace('.', ',')}%</td>
+                <td style="${tdStyle}">${escapeHtmlCell(eq.nivelOtimizacao)}</td>
+              </tr>`
+            )
+            .join('')}
+        </tbody>
+      </table>
+    `);
+
+    if (explorationAreaRows.length > 0) {
+      sections.push(`
+        <h3 style="color:#9A3412;margin-top:16px;">Desempenho & Consumo por Área Operacional</h3>
+        <table style="border-collapse:collapse;width:100%;font-size:12px;">
+          <thead><tr>
+            <th style="${thStyle}">Área</th>
+            <th style="${thStyle}">Entradas</th>
+            <th style="${thStyle}">Equipamentos</th>
+            <th style="${thStyle}">Permanência</th>
+            <th style="${thStyle}">Trabalho Efetivo</th>
+            <th style="${thStyle}">Relanti</th>
+            <th style="${thStyle}">Gasto Oper. (L)</th>
+            <th style="${thStyle}">Gasto Relanti (L)</th>
+            <th style="${thStyle}">Total Comb. (L)</th>
+            <th style="${thStyle}">Eficiência</th>
+          </tr></thead>
+          <tbody>
+            ${explorationAreaRows
+              .map(
+                (ar) => `<tr>
+                  <td style="${tdStyle}">${escapeHtmlCell(ar.area)}</td>
+                  <td style="${tdStyle}">${ar.entradas}</td>
+                  <td style="${tdStyle}">${ar.equipamentosCount}</td>
+                  <td style="${tdStyle}">${formatHMS(ar.permanenciaSeg)}</td>
+                  <td style="${tdStyle}">${formatHMS(ar.produtivoSeg)}</td>
+                  <td style="${tdStyle}">${formatHMS(ar.relantiSeg)}</td>
+                  <td style="${tdStyle}">${ar.combustivelOperacaoLitros.toFixed(1).replace('.', ',')}</td>
+                  <td style="${tdStyle}">${ar.combustivelRelantiLitros.toFixed(1).replace('.', ',')}</td>
+                  <td style="${tdStyle}"><strong>${ar.combustivelTotalLitros.toFixed(1).replace('.', ',')}</strong></td>
+                  <td style="${tdStyle}">${ar.eficienciaEfetivaPct.toFixed(1).replace('.', ',')}%</td>
+                </tr>`
+              )
+              .join('')}
+          </tbody>
+        </table>
+      `);
+    }
+  }
 
   if (category === 'equipment' || category === 'executive') {
     sections.push(`
@@ -877,7 +1097,7 @@ export function generateInstitutionalReportExcelHtml(params: {
 <body style="font-family:Arial,sans-serif;color:#0F172A;background:#FFFFFF;padding:24px;">
   <h2 style="color:#EA580C;margin:0;">${escapeHtmlCell(title)}</h2>
   <p style="font-size:12px;color:#475569;margin:4px 0 12px 0;">
-    ${escapeHtmlCell(organizacao)} · Área: ${escapeHtmlCell(areaLabel)} · Período: ${escapeHtmlCell(periodo)} · Gerado em: ${escapeHtmlCell(generatedAt)}
+    ${escapeHtmlCell(organizacao)} · <strong>${escapeHtmlCell(moduleBadgeLabel)}</strong> · Área: ${escapeHtmlCell(areaLabel)} · Período: ${escapeHtmlCell(periodo)} · Gerado em: ${escapeHtmlCell(generatedAt)}
   </p>
   <table style="border-collapse:collapse;margin-bottom:16px;font-size:12px;">
     <tr>
@@ -885,6 +1105,13 @@ export function generateInstitutionalReportExcelHtml(params: {
       <td style="padding:6px 12px;border:1px solid #FED7AA;background:#FFF7ED;"><strong>Permanência:</strong> ${formatHMS(kpis.permanenciaSeg)}</td>
       <td style="padding:6px 12px;border:1px solid #FED7AA;background:#FFF7ED;"><strong>Operação Motor:</strong> ${formatHMS(kpis.utilizacaoSeg)}</td>
       <td style="padding:6px 12px;border:1px solid #FED7AA;background:#FFF7ED;"><strong>Eficiência Efetiva:</strong> ${kpis.eficienciaEfetivaPct.toFixed(1).replace('.', ',')}%</td>
+      ${
+        moduleId === 'exploracao' && fuelKpis
+          ? `<td style="padding:6px 12px;border:1px solid #FED7AA;background:#FFF7ED;"><strong>Combustível Operação:</strong> ${fuelKpis.combustivelOperacaoLitros.toFixed(1).replace('.', ',')} L (${fuelKpis.taxaMediaOperacaoLh.toFixed(1).replace('.', ',')} L/h)</td>
+             <td style="padding:6px 12px;border:1px solid #FED7AA;background:#FFF7ED;"><strong>Combustível Relanti:</strong> ${fuelKpis.combustivelRelantiLitros.toFixed(1).replace('.', ',')} L (${fuelKpis.taxaMediaRelantiLh.toFixed(1).replace('.', ',')} L/h)</td>
+             <td style="padding:6px 12px;border:1px solid #FED7AA;background:#FFF7ED;"><strong>Total Combustível:</strong> ${fuelKpis.combustivelTotalLitros.toFixed(1).replace('.', ',')} L</td>`
+          : ''
+      }
     </tr>
   </table>
   ${sections.join('\n')}
@@ -1231,5 +1458,265 @@ export function mergeDatasetsWithoutDuplicates(
     addedDetailCount: newDetails.length,
     skippedDuplicateCount: skippedResumo + skippedDetails,
   };
+}
+
+// ============================================================================
+// Módulo Exploração — Optimização das Operações & Consumo de Combustível (L/h)
+// ============================================================================
+
+export function inferDefaultFuelProfile(equipamento: string): EquipmentFuelProfile {
+  const eq = (equipamento || '').trim().toUpperCase();
+
+  if (eq.startsWith('745-')) {
+    return { equipamento, categoria: 'Dumper Articulado 745', operacaoLh: 28.5, relantiLh: 6.2 };
+  }
+  if (eq.startsWith('740-')) {
+    return { equipamento, categoria: 'Dumper Articulado 740', operacaoLh: 24.5, relantiLh: 5.5 };
+  }
+  if (eq.startsWith('375-')) {
+    return { equipamento, categoria: 'Escavadora Pesada 375', operacaoLh: 36.0, relantiLh: 7.5 };
+  }
+  if (eq.startsWith('D10-')) {
+    return { equipamento, categoria: 'Trator de Rastos D10', operacaoLh: 42.0, relantiLh: 8.5 };
+  }
+  if (eq.startsWith('155-')) {
+    return { equipamento, categoria: 'Trator de Rastos 155', operacaoLh: 34.0, relantiLh: 7.0 };
+  }
+  if (eq.startsWith('PC80') || eq.startsWith('PCX9') || eq.startsWith('PCX8') || eq.startsWith('PC66')) {
+    return { equipamento, categoria: 'Escavadora / Pá Carregadora', operacaoLh: 26.0, relantiLh: 5.8 };
+  }
+  if (eq.startsWith('SLB') || eq.startsWith('SST') || eq.startsWith('SX') || eq.startsWith('S90') || eq.startsWith('S60')) {
+    return { equipamento, categoria: 'Camião Basculante Pesado', operacaoLh: 22.0, relantiLh: 4.8 };
+  }
+  if (eq.startsWith('B11')) {
+    return { equipamento, categoria: 'Carregadora / Apoio', operacaoLh: 19.5, relantiLh: 4.4 };
+  }
+  if (eq.startsWith('LZ')) {
+    return { equipamento, categoria: 'Equipamento de Mina LZ', operacaoLh: 23.0, relantiLh: 5.0 };
+  }
+  if (eq.startsWith('CH-') || eq.startsWith('MN-') || eq.startsWith('T-') || eq.startsWith('LD') || eq.startsWith('NX')) {
+    return { equipamento, categoria: 'Transporte / Apoio Operacional', operacaoLh: 16.5, relantiLh: 3.8 };
+  }
+
+  return {
+    equipamento,
+    categoria: 'Pesado Exploração',
+    operacaoLh: 22.0,
+    relantiLh: 5.0,
+  };
+}
+
+export function resolveFuelProfile(
+  equipamento: string,
+  overrides?: Record<string, FuelRatePair>
+): EquipmentFuelProfile {
+  const base = inferDefaultFuelProfile(equipamento);
+  const custom = overrides?.[equipamento];
+  if (!custom) return base;
+  return {
+    ...base,
+    operacaoLh:
+      typeof custom.operacaoLh === 'number' && Number.isFinite(custom.operacaoLh) && custom.operacaoLh >= 0
+        ? custom.operacaoLh
+        : base.operacaoLh,
+    relantiLh:
+      typeof custom.relantiLh === 'number' && Number.isFinite(custom.relantiLh) && custom.relantiLh >= 0
+        ? custom.relantiLh
+        : base.relantiLh,
+  };
+}
+
+export function computeFuelKPIs(
+  records: FleetCycleRecord[],
+  overrides?: Record<string, FuelRatePair>
+): FuelGlobalKPIs {
+  let produtivoSeg = 0;
+  let relantiSeg = 0;
+  let utilizacaoSeg = 0;
+  let combustivelOperacaoLitros = 0;
+  let combustivelRelantiLitros = 0;
+
+  for (const r of records) {
+    const profile = resolveFuelProfile(r.equipamento, overrides);
+    const pHoras = Math.max(0, r.produtivoSeg) / 3600;
+    const relHoras = Math.max(0, r.relantiSeg) / 3600;
+    produtivoSeg += Math.max(0, r.produtivoSeg);
+    relantiSeg += Math.max(0, r.relantiSeg);
+    utilizacaoSeg += Math.max(0, r.utilizacaoSeg);
+    combustivelOperacaoLitros += pHoras * profile.operacaoLh;
+    combustivelRelantiLitros += relHoras * profile.relantiLh;
+  }
+
+  const horasOperacaoEfetiva = produtivoSeg / 3600;
+  const horasRelanti = relantiSeg / 3600;
+  const horasUtilizacaoTotal = utilizacaoSeg / 3600;
+  const combustivelTotalLitros = combustivelOperacaoLitros + combustivelRelantiLitros;
+
+  const taxaMediaOperacaoLh =
+    horasOperacaoEfetiva > 0 ? combustivelOperacaoLitros / horasOperacaoEfetiva : 0;
+  const taxaMediaRelantiLh =
+    horasRelanti > 0 ? combustivelRelantiLitros / horasRelanti : 0;
+  const consumoMedioUtilizacaoLh =
+    horasUtilizacaoTotal > 0 ? combustivelTotalLitros / horasUtilizacaoTotal : 0;
+  const pctDesperdicioRelanti =
+    combustivelTotalLitros > 0
+      ? (combustivelRelantiLitros / combustivelTotalLitros) * 100
+      : 0;
+
+  // Meta de otimização: limitar relanti a no máximo 10% do tempo de motor ligado
+  const targetMaxIdleHours = horasUtilizacaoTotal * 0.1;
+  const excessIdleHours = Math.max(0, horasRelanti - targetMaxIdleHours);
+  const economiaPotencialLitros = excessIdleHours * taxaMediaRelantiLh;
+
+  return {
+    horasOperacaoEfetiva,
+    horasRelanti,
+    horasUtilizacaoTotal,
+    combustivelOperacaoLitros,
+    combustivelRelantiLitros,
+    combustivelTotalLitros,
+    taxaMediaOperacaoLh,
+    taxaMediaRelantiLh,
+    consumoMedioUtilizacaoLh,
+    pctDesperdicioRelanti,
+    economiaPotencialLitros,
+  };
+}
+
+export function computeExplorationEquipmentMetrics(
+  records: FleetCycleRecord[],
+  overrides?: Record<string, FuelRatePair>
+): ExplorationEquipmentMetric[] {
+  const byEquip = new Map<string, FleetCycleRecord[]>();
+  for (const r of records) {
+    const list = byEquip.get(r.equipamento) ?? [];
+    list.push(r);
+    byEquip.set(r.equipamento, list);
+  }
+
+  const result: ExplorationEquipmentMetric[] = [];
+
+  for (const [equipamento, list] of byEquip.entries()) {
+    const profile = resolveFuelProfile(equipamento, overrides);
+    const entradas = list.reduce((s, r) => s + getEntryCount(r), 0);
+    const permanenciaSeg = list.reduce((s, r) => s + r.duracaoSeg, 0);
+    const utilizacaoSeg = list.reduce((s, r) => s + r.utilizacaoSeg, 0);
+    const produtivoSeg = list.reduce((s, r) => s + r.produtivoSeg, 0);
+    const relantiSeg = list.reduce((s, r) => s + r.relantiSeg, 0);
+    const paradoSeg = list.reduce((s, r) => s + r.paradoSeg, 0);
+    const distanciaHoras =
+      Math.round(list.reduce((s, r) => s + r.distanciaHoras, 0) * 10) / 10;
+
+    const pHoras = produtivoSeg / 3600;
+    const rHoras = relantiSeg / 3600;
+    const uHoras = utilizacaoSeg / 3600;
+
+    const combustivelOperacaoLitros = pHoras * profile.operacaoLh;
+    const combustivelRelantiLitros = rHoras * profile.relantiLh;
+    const combustivelTotalLitros = combustivelOperacaoLitros + combustivelRelantiLitros;
+    const consumoMedioUtilizacaoLh =
+      uHoras > 0 ? combustivelTotalLitros / uHoras : 0;
+    const pctDesperdicioCombustivel =
+      combustivelTotalLitros > 0
+        ? (combustivelRelantiLitros / combustivelTotalLitros) * 100
+        : 0;
+
+    const taxaRelantiSobreUtilizacaoPct =
+      utilizacaoSeg > 0 ? (relantiSeg / utilizacaoSeg) * 100 : 0;
+
+    let nivelOtimizacao: 'Otimizado' | 'Atenção' | 'Crítico' = 'Otimizado';
+    if (taxaRelantiSobreUtilizacaoPct >= 35 || combustivelRelantiLitros >= 25) {
+      nivelOtimizacao = 'Crítico';
+    } else if (taxaRelantiSobreUtilizacaoPct >= 20 || combustivelRelantiLitros >= 10) {
+      nivelOtimizacao = 'Atenção';
+    }
+
+    result.push({
+      equipamento,
+      categoria: profile.categoria,
+      entradas,
+      areas: Array.from(new Set(list.map((r) => r.area))),
+      condutores: Array.from(new Set(list.map((r) => r.condutorCompleto))),
+      permanenciaSeg,
+      utilizacaoSeg,
+      produtivoSeg,
+      relantiSeg,
+      paradoSeg,
+      distanciaHoras,
+      eficienciaEfetivaPct:
+        permanenciaSeg > 0 ? (produtivoSeg / permanenciaSeg) * 100 : 0,
+      taxaRelantiSobreUtilizacaoPct,
+      taxaParadoPct:
+        permanenciaSeg > 0 ? (paradoSeg / permanenciaSeg) * 100 : 0,
+      operacaoLh: profile.operacaoLh,
+      relantiLh: profile.relantiLh,
+      combustivelOperacaoLitros,
+      combustivelRelantiLitros,
+      combustivelTotalLitros,
+      consumoMedioUtilizacaoLh,
+      pctDesperdicioCombustivel,
+      nivelOtimizacao,
+    });
+  }
+
+  return result.sort((a, b) => b.combustivelTotalLitros - a.combustivelTotalLitros);
+}
+
+export function computeExplorationAreaMetrics(
+  records: FleetCycleRecord[],
+  overrides?: Record<string, FuelRatePair>
+): ExplorationAreaMetric[] {
+  const byArea = new Map<string, FleetCycleRecord[]>();
+  for (const r of records) {
+    const list = byArea.get(r.area) ?? [];
+    list.push(r);
+    byArea.set(r.area, list);
+  }
+
+  const result: ExplorationAreaMetric[] = [];
+
+  for (const [area, list] of byArea.entries()) {
+    const entradas = list.reduce((s, r) => s + getEntryCount(r), 0);
+    const permanenciaSeg = list.reduce((s, r) => s + r.duracaoSeg, 0);
+    const utilizacaoSeg = list.reduce((s, r) => s + r.utilizacaoSeg, 0);
+    const produtivoSeg = list.reduce((s, r) => s + r.produtivoSeg, 0);
+    const relantiSeg = list.reduce((s, r) => s + r.relantiSeg, 0);
+    const paradoSeg = list.reduce((s, r) => s + r.paradoSeg, 0);
+
+    let combustivelOperacaoLitros = 0;
+    let combustivelRelantiLitros = 0;
+
+    for (const r of list) {
+      const profile = resolveFuelProfile(r.equipamento, overrides);
+      combustivelOperacaoLitros += (r.produtivoSeg / 3600) * profile.operacaoLh;
+      combustivelRelantiLitros += (r.relantiSeg / 3600) * profile.relantiLh;
+    }
+
+    const equipamentos = Array.from(new Set(list.map((r) => r.equipamento)));
+    const condutores = Array.from(new Set(list.map((r) => r.condutorCompleto)));
+
+    result.push({
+      area,
+      entradas,
+      equipamentosCount: equipamentos.length,
+      equipamentos,
+      condutoresCount: condutores.length,
+      permanenciaSeg,
+      utilizacaoSeg,
+      produtivoSeg,
+      relantiSeg,
+      paradoSeg,
+      mediaCicloSeg: entradas > 0 ? Math.round(permanenciaSeg / entradas) : 0,
+      eficienciaEfetivaPct:
+        permanenciaSeg > 0 ? (produtivoSeg / permanenciaSeg) * 100 : 0,
+      taxaRelantiSobreUtilizacaoPct:
+        utilizacaoSeg > 0 ? (relantiSeg / utilizacaoSeg) * 100 : 0,
+      combustivelOperacaoLitros,
+      combustivelRelantiLitros,
+      combustivelTotalLitros: combustivelOperacaoLitros + combustivelRelantiLitros,
+    });
+  }
+
+  return result.sort((a, b) => b.permanenciaSeg - a.permanenciaSeg);
 }
 

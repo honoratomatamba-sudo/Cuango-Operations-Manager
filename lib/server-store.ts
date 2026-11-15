@@ -1,18 +1,32 @@
+import { CUANGO_EXPLORACAO_SEED_DATASET } from './cuango-exploracao-seed';
 import { CUANGO_SEED_DATASET } from './cuango-seed-data';
 import { deduplicateDataset } from './fleet-analytics';
-import { FleetDataset } from './fleet-types';
+import { FleetDataset, FleetModuleId } from './fleet-types';
 
-let activeDataset: FleetDataset = deduplicateDataset({
-  metadata: { ...CUANGO_SEED_DATASET.metadata },
-  records: [...CUANGO_SEED_DATASET.records],
-  detailCycles: [...(CUANGO_SEED_DATASET.detailCycles ?? [])],
-}).dataset;
+const moduleDatasets: Record<FleetModuleId, FleetDataset> = {
+  metalurgia: deduplicateDataset({
+    metadata: { ...CUANGO_SEED_DATASET.metadata },
+    records: [...CUANGO_SEED_DATASET.records],
+    detailCycles: [...(CUANGO_SEED_DATASET.detailCycles ?? [])],
+  }).dataset,
+  exploracao: deduplicateDataset({
+    metadata: { ...CUANGO_EXPLORACAO_SEED_DATASET.metadata },
+    records: [...CUANGO_EXPLORACAO_SEED_DATASET.records],
+    detailCycles: [...(CUANGO_EXPLORACAO_SEED_DATASET.detailCycles ?? [])],
+  }).dataset,
+};
 
-export function getActiveServerDataset(): FleetDataset {
-  activeDataset = deduplicateDataset(activeDataset).dataset;
-  return activeDataset;
+export function getActiveServerDataset(
+  moduleId: FleetModuleId = 'metalurgia'
+): FleetDataset {
+  const clean = deduplicateDataset(moduleDatasets[moduleId]).dataset;
+  moduleDatasets[moduleId] = clean;
+  return clean;
 }
 
-export function setActiveServerDataset(dataset: FleetDataset): void {
-  activeDataset = deduplicateDataset(dataset).dataset;
+export function setActiveServerDataset(
+  dataset: FleetDataset,
+  moduleId: FleetModuleId = 'metalurgia'
+): void {
+  moduleDatasets[moduleId] = deduplicateDataset(dataset).dataset;
 }

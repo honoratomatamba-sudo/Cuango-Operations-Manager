@@ -12,24 +12,36 @@ import Image from 'next/image';
 import { User } from 'firebase/auth';
 import { motion, AnimatePresence } from 'motion/react';
 import { AuthSessionResponse, PublicUser } from '@/lib/auth-types';
+import { CUANGO_EXPLORACAO_SEED_DATASET } from '@/lib/cuango-exploracao-seed';
+import { CUANGO_SEED_DATASET } from '@/lib/cuango-seed-data';
 import {
   applyFilters,
   canonicalFileName,
   computeDriverMetrics,
   computeEquipmentAreaMetrics,
+  computeExplorationAreaMetrics,
+  computeExplorationEquipmentMetrics,
+  computeFuelKPIs,
   computeGlobalKPIs,
   computeHourlyDistribution,
   computeShiftMetrics,
   deduplicateDataset,
   formatHMS,
+  generateInstitutionalReportCSV,
   generatePowerBICSV,
   getEntryCount,
   isDuplicateFileName,
   mergeDatasetsWithoutDuplicates,
   OFFICIAL_REPORT_FOOTER,
+  resolveFuelProfile,
 } from '@/lib/fleet-analytics';
-import { CUANGO_SEED_DATASET } from '@/lib/cuango-seed-data';
-import { FilterState, FleetDataset } from '@/lib/fleet-types';
+import {
+  FilterState,
+  FleetDataset,
+  FleetModuleId,
+  FuelRatePair,
+} from '@/lib/fleet-types';
+import { parseNovatronicaPdfBytes } from '@/lib/novatronica-pdf-parser';
 import {
   clearAccessToken,
   getAccessToken,
@@ -55,6 +67,7 @@ import { CyclesDetailTable } from './CyclesDetailTable';
 import { ReportsView } from './ReportsView';
 import { PowerBiAutomationView } from './PowerBiAutomationView';
 import { PdfUploadModal } from './PdfUploadModal';
+import { ExplorationModuleView } from './ExplorationModuleView';
 import {
   GmailAttachmentRow,
   GmailSyncController,
@@ -73,10 +86,27 @@ const INITIAL_FILTERS: FilterState = {
 const AUTOSYNC_STORAGE_KEY = 'cuango_gmail_autosync';
 const IMPORTED_IDS_STORAGE_KEY = 'cuango_gmail_imported_ids_v3';
 const DATASET_STORAGE_KEY = 'cuango_fleet_dataset_v3';
+const EXPLORACAO_DATASET_STORAGE_KEY = 'cuango_fleet_dataset_exploracao_v1';
+const EXPLORACAO_FUEL_RATES_STORAGE_KEY = 'cuango_exploracao_fuel_rates_v1';
 const AUTH_TOKEN_STORAGE_KEY = 'cuango_auth_token_v1';
 const STORAGE_CHANGE_EVENT = 'cuango-storage-change';
 
-let inMemoryDatasetFallback: FleetDataset | null = null;
+const inMemoryDatasetFallback: Record<FleetModuleId, FleetDataset | null> = {
+  metalurgia: null,
+  exploracao: null,
+};
+
+function getDatasetStorageKey(moduleId: FleetModuleId): string {
+  return moduleId === 'exploracao'
+    ? EXPLORACAO_DATASET_STORAGE_KEY
+    : DATASET_STORAGE_KEY;
+}
+
+function getSeedForModule(moduleId: FleetModuleId): FleetDataset {
+  return moduleId === 'exploracao'
+    ? CUANGO_EXPLORACAO_SEED_DATASET
+    : CUANGO_SEED_DATASET;
+}
 
 function subscribeLocalStorage(callback: () => void) {
   if (typeof window === 'undefined') return () => {};
@@ -106,27 +136,83 @@ function getImportedIdsServerSnapshotRaw(): string {
   return '[]';
 }
 
-function getDatasetSnapshotRaw(): string {
+function getMetalurgiaDatasetSnapshotRaw(): string {
   if (typeof window === 'undefined') return '';
   return window.localStorage.getItem(DATASET_STORAGE_KEY) ?? '';
 }
 
-function getDatasetServerSnapshotRaw(): string {
+function getExploracaoDatasetSnapshotRaw(): string {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem(EXPLORACAO_DATASET_STORAGE_KEY) ?? '';
+}
+
+function getFuelRatesSnapshotRaw(): string {
+  if (typeof window === 'undefined') return '{}';
+  return window.localStorage.getItem(EXPLORACAO_FUEL_RATES_STORAGE_KEY) ?? '{}';
+}
+
+function getEmptyServerSnapshot(): string {
   return '';
 }
 
-function writeDatasetToStorage(nextDataset: FleetDataset): FleetDataset {
+function getEmptyObjectServerSnapshot(): string {
+  return '{}';
+}
+
+function parseDatasetSnapshot(
+  raw: string,
+  moduleId: FleetModuleId
+): FleetDataset {
+  const fallback = inMemoryDatasetFallback[moduleId];
+  const seed = getSeedForModule(moduleId);
+
+  if (!raw) {
+    return fallback
+      ? deduplicateDataset(fallback).dataset
+      : deduplicateDataset(seed).dataset;
+  }
+  try {
+    const parsed = JSON.parse(raw) as FleetDataset;
+    if (parsed && Array.isArray(parsed.records) && parsed.metadata) {
+      return deduplicateDataset(parsed).dataset;
+    }
+  } catch {
+    // Fallback to seed if corrupted
+  }
+  return deduplicateDataset(seed).dataset;
+}
+
+function writeDatasetToStorage(
+  nextDataset: FleetDataset,
+  moduleId: FleetModuleId
+): FleetDataset {
   const clean = deduplicateDataset(nextDataset).dataset;
-  inMemoryDatasetFallback = clean;
+  inMemoryDatasetFallback[moduleId] = clean;
   if (typeof window !== 'undefined') {
     try {
-      window.localStorage.setItem(DATASET_STORAGE_KEY, JSON.stringify(clean));
+      window.localStorage.setItem(
+        getDatasetStorageKey(moduleId),
+        JSON.stringify(clean)
+      );
     } catch {
       // Ignore quota errors; inMemoryDatasetFallback holds latest state
     }
     window.dispatchEvent(new Event(STORAGE_CHANGE_EVENT));
   }
   return clean;
+}
+
+function writeFuelRatesToStorage(rates: Record<string, FuelRatePair>) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      EXPLORACAO_FUEL_RATES_STORAGE_KEY,
+      JSON.stringify(rates)
+    );
+  } catch {
+    // Ignore quota errors
+  }
+  window.dispatchEvent(new Event(STORAGE_CHANGE_EVENT));
 }
 
 function writeAutoSyncPreference(enabled: boolean) {
@@ -158,37 +244,82 @@ function persistImportedAttachmentId(attachmentKey: string) {
   }
 }
 
+function detectModuleFromDataset(
+  incoming: FleetDataset,
+  fallback: FleetModuleId
+): FleetModuleId {
+  const grupo = (incoming.metadata.grupoEquipamentos || '').toLowerCase();
+  const arq = (incoming.metadata.arquivoOrigem || '').toLowerCase();
+  if (grupo.includes('explora') || arq.includes('explora')) {
+    return 'exploracao';
+  }
+  if (grupo.includes('metalurg') || arq.includes('metalurg')) {
+    return 'metalurgia';
+  }
+  return fallback;
+}
+
 export function FleetDashboardApp() {
-  const datasetRaw = useSyncExternalStore(
+  const metalurgiaRaw = useSyncExternalStore(
     subscribeLocalStorage,
-    getDatasetSnapshotRaw,
-    getDatasetServerSnapshotRaw
+    getMetalurgiaDatasetSnapshotRaw,
+    getEmptyServerSnapshot
   );
 
-  const dataset = useMemo<FleetDataset>(() => {
-    if (!datasetRaw) {
-      return inMemoryDatasetFallback
-        ? deduplicateDataset(inMemoryDatasetFallback).dataset
-        : deduplicateDataset(CUANGO_SEED_DATASET).dataset;
-    }
+  const exploracaoRaw = useSyncExternalStore(
+    subscribeLocalStorage,
+    getExploracaoDatasetSnapshotRaw,
+    getEmptyServerSnapshot
+  );
+
+  const fuelRatesRaw = useSyncExternalStore(
+    subscribeLocalStorage,
+    getFuelRatesSnapshotRaw,
+    getEmptyObjectServerSnapshot
+  );
+
+  const metalurgiaDataset = useMemo(
+    () => parseDatasetSnapshot(metalurgiaRaw, 'metalurgia'),
+    [metalurgiaRaw]
+  );
+
+  const exploracaoDataset = useMemo(
+    () => parseDatasetSnapshot(exploracaoRaw, 'exploracao'),
+    [exploracaoRaw]
+  );
+
+  const fuelOverrides = useMemo<Record<string, FuelRatePair>>(() => {
     try {
-      const parsed = JSON.parse(datasetRaw) as FleetDataset;
-      if (parsed && Array.isArray(parsed.records) && parsed.metadata) {
-        return deduplicateDataset(parsed).dataset;
-      }
+      const parsed = JSON.parse(fuelRatesRaw) as Record<string, FuelRatePair>;
+      return parsed && typeof parsed === 'object' ? parsed : {};
     } catch {
-      // Fallback to seed if corrupted
+      return {};
     }
-    return deduplicateDataset(CUANGO_SEED_DATASET).dataset;
-  }, [datasetRaw]);
+  }, [fuelRatesRaw]);
 
-  const datasetRef = useRef<FleetDataset>(dataset);
-  useEffect(() => {
-    datasetRef.current = dataset;
-  }, [dataset]);
-
+  const [activeModule, setActiveModule] = useState<FleetModuleId>('metalurgia');
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
   const [filters, setFilters] = useState<FilterState>(INITIAL_FILTERS);
+
+  const dataset =
+    activeModule === 'exploracao' ? exploracaoDataset : metalurgiaDataset;
+
+  const datasetsRef = useRef<Record<FleetModuleId, FleetDataset>>({
+    metalurgia: metalurgiaDataset,
+    exploracao: exploracaoDataset,
+  });
+  const activeModuleRef = useRef<FleetModuleId>(activeModule);
+
+  useEffect(() => {
+    datasetsRef.current = {
+      metalurgia: metalurgiaDataset,
+      exploracao: exploracaoDataset,
+    };
+  }, [metalurgiaDataset, exploracaoDataset]);
+
+  useEffect(() => {
+    activeModuleRef.current = activeModule;
+  }, [activeModule]);
 
   // Application user/password authentication state
   const [authChecking, setAuthChecking] = useState(true);
@@ -214,7 +345,6 @@ export function FleetDashboardApp() {
   const [lastSyncText, setLastSyncText] = useState<string | null>(null);
   const [gmailError, setGmailError] = useState<string | null>(null);
 
-  // Active by default and persisted across tab changes & reloads until manually toggled off
   const autoSyncEnabled = useSyncExternalStore(
     subscribeLocalStorage,
     getAutoSyncSnapshot,
@@ -248,15 +378,24 @@ export function FleetDashboardApp() {
 
   const hasAutoSyncedOnAuthRef = useRef(false);
 
-  // Keep server Power BI feed synchronized with active deduplicated client dataset
+  // Keep server Power BI feed synchronized for each module when locally persisted
   useEffect(() => {
-    if (!datasetRaw) return;
+    if (!metalurgiaRaw) return;
     void fetch('/api/powerbi/feed', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dataset }),
+      body: JSON.stringify({ moduleId: 'metalurgia', dataset: metalurgiaDataset }),
     }).catch(() => {});
-  }, [dataset, datasetRaw]);
+  }, [metalurgiaDataset, metalurgiaRaw]);
+
+  useEffect(() => {
+    if (!exploracaoRaw) return;
+    void fetch('/api/powerbi/feed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ moduleId: 'exploracao', dataset: exploracaoDataset }),
+    }).catch(() => {});
+  }, [exploracaoDataset, exploracaoRaw]);
 
   useEffect(() => {
     try {
@@ -337,14 +476,16 @@ export function FleetDashboardApp() {
     };
   }, []);
 
-  // Load workspace & fleet records from Supabase once authenticated
+  // Load workspace & fleet records for both Metalurgia and Exploração from Supabase once authenticated
   useEffect(() => {
     if (!currentUser) return;
     let isCancelled = false;
 
-    const loadFromSupabase = async () => {
+    const syncModuleFromSupabase = async (mod: FleetModuleId) => {
       try {
-        const res = await fetch('/api/supabase/fleet', { cache: 'no-store' });
+        const res = await fetch(`/api/supabase/fleet?modulo=${mod}`, {
+          cache: 'no-store',
+        });
         if (!res.ok || isCancelled) return;
         const data = (await res.json()) as {
           schemaReady?: boolean;
@@ -353,20 +494,29 @@ export function FleetDashboardApp() {
         };
         if (isCancelled || !data.schemaReady) return;
 
-        if (typeof data.autoSyncEnabled === 'boolean' && data.autoSyncEnabled !== autoSyncEnabledRef.current) {
+        if (
+          mod === 'metalurgia' &&
+          typeof data.autoSyncEnabled === 'boolean' &&
+          data.autoSyncEnabled !== autoSyncEnabledRef.current
+        ) {
           writeAutoSyncPreference(data.autoSyncEnabled);
         }
 
-        if (data.dataset && Array.isArray(data.dataset.records) && data.dataset.records.length > 0) {
-          const persisted = writeDatasetToStorage(data.dataset);
-          datasetRef.current = persisted;
+        if (
+          data.dataset &&
+          Array.isArray(data.dataset.records) &&
+          data.dataset.records.length > 0
+        ) {
+          const persisted = writeDatasetToStorage(data.dataset, mod);
+          datasetsRef.current[mod] = persisted;
         } else if (!data.dataset) {
           await fetch('/api/supabase/fleet', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               action: 'sync',
-              dataset: datasetRef.current,
+              moduleId: mod,
+              dataset: datasetsRef.current[mod],
               autoSyncEnabled: autoSyncEnabledRef.current,
             }),
           });
@@ -376,7 +526,10 @@ export function FleetDashboardApp() {
       }
     };
 
-    void loadFromSupabase();
+    void Promise.all([
+      syncModuleFromSupabase('metalurgia'),
+      syncModuleFromSupabase('exploracao'),
+    ]);
 
     return () => {
       isCancelled = true;
@@ -403,7 +556,6 @@ export function FleetDashboardApp() {
     [dataset.records]
   );
 
-  // Primary report records come from "Resumo" page
   const filteredResumoRecords = useMemo(
     () =>
       applyFilters(
@@ -413,13 +565,11 @@ export function FleetDashboardApp() {
     [dataset.records, filters, hasDetailCycles]
   );
 
-  // Granular cycles from "Lista" (when available) allow accurate hourly/shift slicing
   const filteredDetailCycles = useMemo(() => {
     if (!hasDetailCycles || !dataset.detailCycles) return filteredResumoRecords;
     return applyFilters(dataset.detailCycles, filters);
   }, [dataset.detailCycles, filters, hasDetailCycles, filteredResumoRecords]);
 
-  // Base for hourly/shift charts keeps all hours/shifts visible for interactive cross-filtering
   const detailBaseWithoutHour = useMemo(() => {
     const src =
       hasDetailCycles && dataset.detailCycles
@@ -436,7 +586,6 @@ export function FleetDashboardApp() {
     return applyFilters(src, { ...filters, shiftId: 'ALL' });
   }, [dataset.detailCycles, dataset.records, filters, hasDetailCycles]);
 
-  // Use Resumo primary report by default; switch to filtered detail cycles only when shift/hour slicer narrows within the day
   const isIntraDaySliced =
     hasDetailCycles && (filters.shiftId !== 'ALL' || filters.hour !== null);
   const analyticsRecords = isIntraDaySliced
@@ -468,12 +617,71 @@ export function FleetDashboardApp() {
     [detailBaseWithoutHour]
   );
 
+  // Exploração Fuel & Operations Optimization Metrics
+  const fuelKpis = useMemo(
+    () =>
+      activeModule === 'exploracao'
+        ? computeFuelKPIs(analyticsRecords, fuelOverrides)
+        : undefined,
+    [activeModule, analyticsRecords, fuelOverrides]
+  );
+
+  const explorationEquipRows = useMemo(
+    () =>
+      activeModule === 'exploracao'
+        ? computeExplorationEquipmentMetrics(analyticsRecords, fuelOverrides)
+        : [],
+    [activeModule, analyticsRecords, fuelOverrides]
+  );
+
+  const explorationAreaRows = useMemo(
+    () =>
+      activeModule === 'exploracao'
+        ? computeExplorationAreaMetrics(analyticsRecords, fuelOverrides)
+        : [],
+    [activeModule, analyticsRecords, fuelOverrides]
+  );
+
   const selectedAreaLabel =
     filters.area !== 'ALL'
       ? filters.area
       : availableAreas.length === 1
       ? availableAreas[0]
       : 'Áreas Selecionadas';
+
+  const handleModuleChange = (mod: FleetModuleId) => {
+    if (mod === activeModule) return;
+    setActiveModule(mod);
+    setFilters((prev) => ({
+      ...INITIAL_FILTERS,
+      shiftScheme: prev.shiftScheme,
+    }));
+    setUploadError(null);
+    setUploadSuccess(null);
+    if (activeTab === 'users') {
+      setActiveTab('overview');
+    }
+  };
+
+  const handleUpdateFuelRate = (
+    equipamento: string,
+    field: 'operacaoLh' | 'relantiLh',
+    value: number
+  ) => {
+    const current = resolveFuelProfile(equipamento, fuelOverrides);
+    const next: Record<string, FuelRatePair> = {
+      ...fuelOverrides,
+      [equipamento]: {
+        operacaoLh: field === 'operacaoLh' ? value : current.operacaoLh,
+        relantiLh: field === 'relantiLh' ? value : current.relantiLh,
+      },
+    };
+    writeFuelRatesToStorage(next);
+  };
+
+  const handleResetFuelRates = () => {
+    writeFuelRatesToStorage({});
+  };
 
   const handleFilterChange = (patch: Partial<FilterState>) => {
     setFilters((prev) => ({ ...prev, ...patch }));
@@ -487,12 +695,36 @@ export function FleetDashboardApp() {
   };
 
   const handleExportCsv = () => {
-    const csv = generatePowerBICSV(analyticsRecords, filters.shiftScheme);
+    const csv =
+      activeModule === 'exploracao'
+        ? generateInstitutionalReportCSV({
+            moduleId: 'exploracao',
+            category: 'optimization',
+            title: 'Relatório Exploração — Combustível (L/h) & Optimização das Operações',
+            organizacao: dataset.metadata.organizacao,
+            periodo: `${dataset.metadata.dataInicio} até ${dataset.metadata.dataFim}`,
+            areaLabel: selectedAreaLabel,
+            kpis,
+            equipmentRows: equipmentAreaMetrics,
+            driverRows: driverMetrics,
+            shiftRows: shiftMetrics,
+            records: analyticsRecords,
+            scheme: filters.shiftScheme,
+            fuelKpis,
+            explorationEquipRows,
+            explorationAreaRows,
+          })
+        : generatePowerBICSV(analyticsRecords, filters.shiftScheme);
+
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Cuango_Fleet_PowerBI_${dataset.metadata.dataInicio.replace(/\//g, '-')}.csv`;
+    const prefix =
+      activeModule === 'exploracao'
+        ? 'Cuango_Exploracao_Combustivel'
+        : 'Cuango_Metalurgia_PowerBI';
+    link.download = `${prefix}_${dataset.metadata.dataInicio.replace(/\//g, '-')}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -505,14 +737,20 @@ export function FleetDashboardApp() {
       mode: 'replace' | 'append',
       label: string
     ): Promise<{ accepted: boolean; reason?: string }> => {
-      const prev = deduplicateDataset(datasetRef.current).dataset;
+      const targetModule = detectModuleFromDataset(
+        incoming,
+        activeModuleRef.current
+      );
+      const prev = deduplicateDataset(datasetsRef.current[targetModule]).dataset;
       const cleanIncoming = deduplicateDataset(incoming).dataset;
       const merge = mergeDatasetsWithoutDuplicates(prev, cleanIncoming);
 
       if (merge.duplicateFile) {
         return {
           accepted: false,
-          reason: `Importação bloqueada: o ficheiro "${cleanIncoming.metadata.arquivoOrigem}" já existe no sistema.`,
+          reason: `Importação bloqueada: o ficheiro "${cleanIncoming.metadata.arquivoOrigem}" já existe no módulo ${
+            targetModule === 'exploracao' ? 'Exploração' : 'Metalurgia'
+          }.`,
         };
       }
 
@@ -526,24 +764,29 @@ export function FleetDashboardApp() {
       const finalDataset =
         mode === 'append' ? merge.merged : cleanIncoming;
 
-      const persisted = writeDatasetToStorage(finalDataset);
-      datasetRef.current = persisted;
+      const persisted = writeDatasetToStorage(finalDataset, targetModule);
+      datasetsRef.current[targetModule] = persisted;
+
+      if (targetModule !== activeModuleRef.current) {
+        setActiveModule(targetModule);
+      }
 
       void fetch('/api/supabase/fleet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: mode === 'replace' ? 'replace' : 'sync',
+          moduleId: targetModule,
           dataset: persisted,
           autoSyncEnabled: autoSyncEnabledRef.current,
         }),
       }).catch(() => {});
 
-      await fetch('/api/powerbi/feed', {
+      void fetch('/api/powerbi/feed', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataset: persisted }),
-      });
+        body: JSON.stringify({ moduleId: targetModule, dataset: persisted }),
+      }).catch(() => {});
 
       setFilters((prevFilters) => ({
         ...INITIAL_FILTERS,
@@ -561,8 +804,9 @@ export function FleetDashboardApp() {
           ? ` (${merge.skippedDuplicateCount} duplicados ignorados)`
           : '';
 
+      const modName = targetModule === 'exploracao' ? 'EXPLORAÇÃO' : 'METALURGIA';
       setUploadSuccess(
-        `Relatório "${label}" processado: ${
+        `Relatório "${label}" processado no módulo ${modName}: ${
           mode === 'append' ? merge.addedResumoCount : persisted.records.length
         } linhas no Resumo · ${addedEntradas} entradas adicionadas${dupNote}.`
       );
@@ -578,39 +822,90 @@ export function FleetDashboardApp() {
     setUploadSuccess(null);
 
     try {
-      // Block duplicate filename BEFORE uploading or parsing
-      if (isDuplicateFileName(datasetRef.current, file.name)) {
+      const targetGuess: FleetModuleId = file.name.toLowerCase().includes('explora')
+        ? 'exploracao'
+        : activeModuleRef.current;
+
+      if (isDuplicateFileName(datasetsRef.current[targetGuess], file.name)) {
         throw new Error(
           `Importação bloqueada: o ficheiro "${file.name}" já existe no sistema.`
         );
       }
 
-      const formData = new FormData();
-      formData.append('file', file);
+      const arrayBuffer = await file.arrayBuffer();
+      const pdfUint8 = new Uint8Array(arrayBuffer);
 
-      const res = await fetch('/api/parse-pdf', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const rawText = await res.text();
-      let payload: { dataset?: FleetDataset; error?: string };
-      try {
-        payload = JSON.parse(rawText) as {
-          dataset?: FleetDataset;
-          error?: string;
-        };
-      } catch {
+      // Verify %PDF- header cleanly before attempting extraction
+      const headerSlice = pdfUint8.slice(0, 16);
+      const headerStr = Array.from(headerSlice)
+        .map((b) => String.fromCharCode(b))
+        .join('');
+      if (!headerStr.includes('%PDF-')) {
         throw new Error(
-          `Resposta inválida do servidor (HTTP ${res.status}). Verifique o tamanho ou formato do PDF.`
+          `O ficheiro "${file.name}" não é um PDF válido (%PDF- não encontrado).`
         );
       }
 
-      if (!res.ok || !payload.dataset) {
-        throw new Error(payload.error || 'Falha ao processar relatório PDF.');
+      // 1. Client-side deterministic Novatronica extraction first (avoids serverless payload/timeout limits on large PDFs)
+      let extractedDataset: FleetDataset | null = null;
+      try {
+        extractedDataset = await parseNovatronicaPdfBytes(pdfUint8, file.name);
+      } catch {
+        extractedDataset = null;
       }
 
-      const result = await applyIncomingDataset(payload.dataset, mode, file.name);
+      // 2. Fall back to /api/parse-pdf (server parser + Gemini fallback) when needed
+      if (!extractedDataset || extractedDataset.records.length === 0) {
+        if (file.size > 4.4 * 1024 * 1024) {
+          throw new Error(
+            `Não foi possível extrair tabelas Novatronica de "${file.name}" localmente e o ficheiro (${(
+              file.size /
+              (1024 * 1024)
+            ).toFixed(1)} MB) excede o limite de envio ao servidor (4,4 MB).`
+          );
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        let res: Response;
+        try {
+          res = await fetch('/api/parse-pdf', {
+            method: 'POST',
+            body: formData,
+          });
+        } catch (netErr) {
+          const rawMsg = netErr instanceof Error ? netErr.message : '';
+          throw new Error(
+            `Falha de ligação ao servidor ao importar "${file.name}". Verifique a ligação à internet ou tente novamente.${
+              rawMsg && !rawMsg.toLowerCase().includes('failed to fetch')
+                ? ` (${rawMsg})`
+                : ''
+            }`
+          );
+        }
+
+        const rawText = await res.text();
+        let payload: { dataset?: FleetDataset; error?: string };
+        try {
+          payload = JSON.parse(rawText) as {
+            dataset?: FleetDataset;
+            error?: string;
+          };
+        } catch {
+          throw new Error(
+            `Resposta inválida do servidor (HTTP ${res.status}). Verifique o tamanho ou formato do PDF.`
+          );
+        }
+
+        if (!res.ok || !payload.dataset) {
+          throw new Error(payload.error || 'Falha ao processar relatório PDF.');
+        }
+
+        extractedDataset = payload.dataset;
+      }
+
+      const result = await applyIncomingDataset(extractedDataset, mode, file.name);
       if (!result.accepted) {
         throw new Error(
           result.reason || 'Dados duplicados bloqueados na importação.'
@@ -618,8 +913,12 @@ export function FleetDashboardApp() {
       }
       setUploadModalOpen(false);
     } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Erro ao processar arquivo PDF.';
       setUploadError(
-        err instanceof Error ? err.message : 'Erro ao processar arquivo PDF.'
+        msg.toLowerCase().includes('failed to fetch')
+          ? 'Falha de ligação ao processar o PDF. Verifique a ligação ou recarregue a página.'
+          : msg
       );
     } finally {
       setIsUploading(false);
@@ -628,28 +927,30 @@ export function FleetDashboardApp() {
 
   const handleCleanDuplicates = async () => {
     setUploadError(null);
-    const current = datasetRef.current;
+    const mod = activeModuleRef.current;
+    const current = datasetsRef.current[mod];
     const { dataset: cleaned, removedRecords, removedDetails } =
       deduplicateDataset(current);
 
-    const persisted = writeDatasetToStorage(cleaned);
-    datasetRef.current = persisted;
+    const persisted = writeDatasetToStorage(cleaned, mod);
+    datasetsRef.current[mod] = persisted;
 
     void fetch('/api/supabase/fleet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: 'replace',
+        moduleId: mod,
         dataset: persisted,
         autoSyncEnabled: autoSyncEnabledRef.current,
       }),
     }).catch(() => {});
 
-    await fetch('/api/powerbi/feed', {
+    void fetch('/api/powerbi/feed', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dataset: persisted }),
-    });
+      body: JSON.stringify({ moduleId: mod, dataset: persisted }),
+    }).catch(() => {});
 
     const totalRemoved = removedRecords + removedDetails;
     if (totalRemoved > 0) {
@@ -664,32 +965,38 @@ export function FleetDashboardApp() {
   };
 
   const handleResetToSeed = async () => {
-    const cleanSeed = writeDatasetToStorage(CUANGO_SEED_DATASET);
-    datasetRef.current = cleanSeed;
-    setFilters(INITIAL_FILTERS);
+    const mod = activeModuleRef.current;
+    const cleanSeed = writeDatasetToStorage(getSeedForModule(mod), mod);
+    datasetsRef.current[mod] = cleanSeed;
+    setFilters((prev) => ({ ...INITIAL_FILTERS, shiftScheme: prev.shiftScheme }));
     setUploadError(null);
     setUploadSuccess(
-      'Relatório Resumo original de 14/11/2026 (3 linhas · 113 entradas) restaurado.'
+      mod === 'exploracao'
+        ? 'Relatório Exploração original de 15/11/2026 (184 linhas Resumo · 1.827 entradas) restaurado.'
+        : 'Relatório Metalurgia original de 14/11/2026 (3 linhas Resumo · 113 entradas) restaurado.'
     );
     void fetch('/api/supabase/fleet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: 'replace',
+        moduleId: mod,
         dataset: cleanSeed,
         autoSyncEnabled: autoSyncEnabledRef.current,
       }),
     }).catch(() => {});
-    await fetch('/api/powerbi/feed', {
+    void fetch('/api/powerbi/feed', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dataset: cleanSeed }),
-    });
+      body: JSON.stringify({ moduleId: mod, dataset: cleanSeed }),
+    }).catch(() => {});
   };
 
   const isFileAlreadyInSystem = useCallback(
-    (filename: string) => isDuplicateFileName(dataset, filename),
-    [dataset]
+    (filename: string) =>
+      isDuplicateFileName(metalurgiaDataset, filename) ||
+      isDuplicateFileName(exploracaoDataset, filename),
+    [metalurgiaDataset, exploracaoDataset]
   );
 
   // Lifted Gmail actions with strict filename & content duplicate prevention
@@ -698,8 +1005,10 @@ export function FleetDashboardApp() {
       item: GmailAttachmentRow,
       mode: 'replace' | 'append'
     ): Promise<boolean> => {
-      // Check filename BEFORE calling backend or downloading attachment
-      if (isDuplicateFileName(datasetRef.current, item.filename)) {
+      if (
+        isDuplicateFileName(datasetsRef.current.metalurgia, item.filename) ||
+        isDuplicateFileName(datasetsRef.current.exploracao, item.filename)
+      ) {
         setGmailError(
           `Importação bloqueada: o ficheiro "${item.filename}" já existe no sistema.`
         );
@@ -832,8 +1141,10 @@ export function FleetDashboardApp() {
         const found = data.items ?? [];
         setGmailItems(found);
 
-        const existingFilesCount = found.filter((it) =>
-          isDuplicateFileName(datasetRef.current, it.filename)
+        const existingFilesCount = found.filter(
+          (it) =>
+            isDuplicateFileName(datasetsRef.current.metalurgia, it.filename) ||
+            isDuplicateFileName(datasetsRef.current.exploracao, it.filename)
         ).length;
 
         setLastSyncText(
@@ -846,7 +1157,8 @@ export function FleetDashboardApp() {
             if (importedIdsRef.current.has(it.id)) continue;
             const canon = canonicalFileName(it.filename);
             if (
-              isDuplicateFileName(datasetRef.current, it.filename) ||
+              isDuplicateFileName(datasetsRef.current.metalurgia, it.filename) ||
+              isDuplicateFileName(datasetsRef.current.exploracao, it.filename) ||
               batchSeenCanonNames.has(canon)
             ) {
               continue;
@@ -866,7 +1178,6 @@ export function FleetDashboardApp() {
     [customQuery, importGmailAttachment]
   );
 
-  // Persistent 5-minute automatic sync across all tabs while authenticated and enabled
   useEffect(() => {
     if (!currentUser || !autoSyncEnabled || needsAuth) return;
 
@@ -916,7 +1227,12 @@ export function FleetDashboardApp() {
     const batchSeenCanonNames = new Set<string>();
     const pending = gmailItems.filter((it) => {
       if (importedIds.has(it.id)) return false;
-      if (isDuplicateFileName(datasetRef.current, it.filename)) return false;
+      if (
+        isDuplicateFileName(datasetsRef.current.metalurgia, it.filename) ||
+        isDuplicateFileName(datasetsRef.current.exploracao, it.filename)
+      ) {
+        return false;
+      }
       const canon = canonicalFileName(it.filename);
       if (batchSeenCanonNames.has(canon)) return false;
       batchSeenCanonNames.add(canon);
@@ -929,7 +1245,12 @@ export function FleetDashboardApp() {
     setGmailError(null);
     try {
       for (const it of pending) {
-        if (isDuplicateFileName(datasetRef.current, it.filename)) continue;
+        if (
+          isDuplicateFileName(datasetsRef.current.metalurgia, it.filename) ||
+          isDuplicateFileName(datasetsRef.current.exploracao, it.filename)
+        ) {
+          continue;
+        }
         await importGmailAttachment(it, 'append');
       }
     } catch (err) {
@@ -963,6 +1284,7 @@ export function FleetDashboardApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'preference',
+          moduleId: activeModuleRef.current,
           autoSyncEnabled: enabled,
         }),
       }).catch(() => {});
@@ -1033,10 +1355,16 @@ export function FleetDashboardApp() {
   }
 
   const canUpload = currentUser.role !== 'visualizador';
+  const showGenericKpiStrip =
+    activeTab !== 'reports' &&
+    activeTab !== 'users' &&
+    !(activeModule === 'exploracao' && activeTab === 'overview');
 
   return (
     <div className="min-h-screen bg-white text-slate-900 flex flex-col lg:flex-row print-reset-layout">
       <DashboardSidebar
+        activeModule={activeModule}
+        onModuleChange={handleModuleChange}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         onOpenUpload={() => {
@@ -1051,6 +1379,8 @@ export function FleetDashboardApp() {
 
       <div className="flex-1 min-w-0 flex flex-col bg-white print-reset-layout">
         <WorkspaceTopBar
+          activeModule={activeModule}
+          onModuleChange={handleModuleChange}
           activeTab={activeTab}
           canUpload={canUpload}
           onOpenUpload={() => {
@@ -1076,26 +1406,65 @@ export function FleetDashboardApp() {
         )}
 
         <main className="flex-1 mx-auto w-full max-w-[1440px] px-6 py-6 space-y-6 bg-white print-reset-layout">
-          {activeTab !== 'reports' && activeTab !== 'users' && (
+          {showGenericKpiStrip && (
             <KpiStrip kpis={kpis} selectedAreaLabel={selectedAreaLabel} />
           )}
 
           <AnimatePresence mode="wait">
-            {activeTab === 'overview' && (
+            {activeTab === 'overview' && activeModule === 'exploracao' && fuelKpis && (
               <motion.div
-                key="overview"
+                key="overview-exploracao"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <ExplorationModuleView
+                  selectedAreaLabel={selectedAreaLabel}
+                  selectedArea={filters.area}
+                  selectedEquipment={filters.equipamento}
+                  selectedDriver={filters.condutor}
+                  selectedShiftId={filters.shiftId}
+                  selectedHour={filters.hour}
+                  shiftScheme={filters.shiftScheme}
+                  kpis={kpis}
+                  fuelKpis={fuelKpis}
+                  equipmentRows={explorationEquipRows}
+                  areaRows={explorationAreaRows}
+                  driverRows={driverMetrics}
+                  shiftRows={shiftMetrics}
+                  hourlyBuckets={hourlyBuckets}
+                  records={analyticsRecords}
+                  fuelOverrides={fuelOverrides}
+                  onUpdateFuelRate={handleUpdateFuelRate}
+                  onResetFuelRates={handleResetFuelRates}
+                  onSelectEquipment={(equipamento) =>
+                    handleFilterChange({ equipamento })
+                  }
+                  onSelectArea={(area) => handleFilterChange({ area })}
+                  onSelectDriver={(condutor) => handleFilterChange({ condutor })}
+                  onSelectShift={(shiftId) => handleFilterChange({ shiftId })}
+                  onSelectHour={(hour) => handleFilterChange({ hour })}
+                  onOpenReports={() => setActiveTab('reports')}
+                  onExportCsv={handleExportCsv}
+                />
+              </motion.div>
+            )}
+
+            {activeTab === 'overview' && activeModule === 'metalurgia' && (
+              <motion.div
+                key="overview-metalurgia"
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                 className="space-y-6"
               >
-                {/* Operational Summary Banner (Clean factual insight, zero-pill) */}
                 {analyticsRecords.length > 0 && (
                   <div className="rounded-lg border border-orange-100 bg-orange-50/35 px-6 py-4 flex flex-wrap items-center justify-between gap-4">
                     <div className="space-y-0.5">
                       <h1 className="text-sm font-semibold text-slate-900">
-                        Diagnóstico Automatizado (Relatório Resumo) · {selectedAreaLabel}
+                        Diagnóstico Automatizado — METALURGIA · {selectedAreaLabel}
                       </h1>
                       <p className="text-xs text-slate-600 tabular-nums">
                         Total de <strong>{kpis.totalEntradas}</strong> entradas registadas, totalizando{' '}
@@ -1160,13 +1529,14 @@ export function FleetDashboardApp() {
 
             {activeTab === 'reports' && (
               <motion.div
-                key="reports"
+                key={`reports-${activeModule}`}
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
               >
                 <ReportsView
+                  activeModule={activeModule}
                   dataset={dataset}
                   selectedAreaLabel={selectedAreaLabel}
                   shiftScheme={filters.shiftScheme}
@@ -1175,6 +1545,9 @@ export function FleetDashboardApp() {
                   driverRows={driverMetrics}
                   shiftRows={shiftMetrics}
                   records={filteredResumoRecords}
+                  fuelKpis={fuelKpis}
+                  explorationEquipRows={explorationEquipRows}
+                  explorationAreaRows={explorationAreaRows}
                 />
               </motion.div>
             )}
@@ -1232,13 +1605,14 @@ export function FleetDashboardApp() {
 
             {activeTab === 'powerbi' && (
               <motion.div
-                key="powerbi"
+                key={`powerbi-${activeModule}`}
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
                 transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
               >
                 <PowerBiAutomationView
+                  activeModule={activeModule}
                   dataset={dataset}
                   filteredCount={filteredResumoRecords.length}
                   totalEntradas={kpis.totalEntradas}
@@ -1276,7 +1650,8 @@ export function FleetDashboardApp() {
           <footer className="mx-auto w-full max-w-[1440px] border-t border-orange-100 bg-white px-6 py-4 text-xs text-slate-600 flex flex-wrap items-center justify-between gap-2">
             <span>{OFFICIAL_REPORT_FOOTER}</span>
             <span className="truncate max-w-md text-slate-500">
-              Ficheiro ativo: {dataset.metadata.arquivoOrigem}
+              Módulo {activeModule === 'exploracao' ? 'Exploração' : 'Metalurgia'} · Ficheiro:{' '}
+              {dataset.metadata.arquivoOrigem}
               {!needsAuth && autoSyncEnabled && ' · Gmail auto-sync ativo (5 min)'}
             </span>
           </footer>
@@ -1284,6 +1659,7 @@ export function FleetDashboardApp() {
       </div>
 
       <PdfUploadModal
+        activeModule={activeModule}
         open={uploadModalOpen}
         isUploading={isUploading}
         error={uploadError}

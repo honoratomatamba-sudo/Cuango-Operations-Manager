@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deduplicateDataset } from '@/lib/fleet-analytics';
-import { FleetCycleRecord, FleetDataset } from '@/lib/fleet-types';
+import {
+  FleetCycleRecord,
+  FleetDataset,
+  FleetModuleId,
+} from '@/lib/fleet-types';
 import { setActiveServerDataset } from '@/lib/server-store';
 import {
   deserializeFleetRecordRow,
@@ -14,14 +18,21 @@ import {
   SupabaseWorkspaceRow,
 } from '@/lib/supabase-server';
 
-export async function GET() {
+function resolveModuleId(raw: string | null | undefined): FleetModuleId {
+  return raw === 'exploracao' ? 'exploracao' : 'metalurgia';
+}
+
+export async function GET(req: NextRequest) {
   const supabase = getSupabaseServerClient();
+  const { searchParams } = new URL(req.url);
+  const moduleId = resolveModuleId(searchParams.get('modulo'));
+  const wsId = moduleId === 'exploracao' ? 'exploracao' : 'default';
 
   try {
     const { data: wsData, error: wsErr } = await supabase
       .from('cuango_workspaces')
       .select('*')
-      .eq('id', 'default')
+      .eq('id', wsId)
       .maybeSingle();
 
     if (wsErr) {
@@ -43,17 +54,24 @@ export async function GET() {
       });
     }
 
-    // Fetch all fleet records in 1000-row pages
     const allRows: SupabaseFleetRecordRow[] = [];
     const PAGE_SIZE = 1000;
     let from = 0;
 
     while (true) {
-      const { data: chunk, error: recErr } = await supabase
+      let query = supabase
         .from('cuango_fleet_records')
         .select('*')
         .order('numero', { ascending: true })
         .range(from, from + PAGE_SIZE - 1);
+
+      if (moduleId === 'exploracao') {
+        query = query.like('record_id', 'exp::%');
+      } else {
+        query = query.not('record_id', 'like', 'exp::%');
+      }
+
+      const { data: chunk, error: recErr } = await query;
 
       if (recErr) {
         if (isMissingSchemaError(recErr)) {
@@ -92,12 +110,13 @@ export async function GET() {
     }).dataset;
 
     if (dataset.records.length > 0) {
-      setActiveServerDataset(dataset);
+      setActiveServerDataset(dataset, moduleId);
     }
 
     return NextResponse.json({
       schemaReady: true,
       sqlSetupRequired: false,
+      moduleId,
       autoSyncEnabled: wsTyped.auto_sync_enabled,
       dataset: dataset.records.length > 0 ? dataset : null,
     });
@@ -120,11 +139,14 @@ export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as {
       action?: 'sync' | 'replace' | 'preference';
+      moduleId?: FleetModuleId;
       dataset?: FleetDataset;
       autoSyncEnabled?: boolean;
     };
 
     const action = body.action ?? 'sync';
+    const moduleId = resolveModuleId(body.moduleId);
+    const wsId = moduleId === 'exploracao' ? 'exploracao' : 'default';
 
     if (action === 'preference') {
       const { error } = await supabase
@@ -133,7 +155,7 @@ export async function POST(req: NextRequest) {
           auto_sync_enabled: Boolean(body.autoSyncEnabled),
           updated_at: new Date().toISOString(),
         })
-        .eq('id', 'default');
+        .eq('id', wsId);
 
       if (error) {
         if (isMissingSchemaError(error)) {
@@ -157,13 +179,15 @@ export async function POST(req: NextRequest) {
     }
 
     const clean = deduplicateDataset(body.dataset).dataset;
-    setActiveServerDataset(clean);
+    setActiveServerDataset(clean, moduleId);
 
     if (action === 'replace') {
-      const { error: delRecErr } = await supabase
-        .from('cuango_fleet_records')
-        .delete()
-        .neq('id', '');
+      const delQuery = supabase.from('cuango_fleet_records').delete();
+      const { error: delRecErr } =
+        moduleId === 'exploracao'
+          ? await delQuery.like('record_id', 'exp::%')
+          : await delQuery.not('record_id', 'like', 'exp::%');
+
       if (delRecErr) {
         if (isMissingSchemaError(delRecErr)) {
           return NextResponse.json({
@@ -175,16 +199,22 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: delRecErr.message }, { status: 500 });
       }
 
-      const { error: delFileErr } = await supabase
-        .from('cuango_report_files')
-        .delete()
-        .neq('id', '');
+      const delFileQuery = supabase.from('cuango_report_files').delete();
+      const { error: delFileErr } =
+        moduleId === 'exploracao'
+          ? await delFileQuery.like('id', 'rep_exp_%')
+          : await delFileQuery.not('id', 'like', 'rep_exp_%');
+
       if (delFileErr && !isMissingSchemaError(delFileErr)) {
         return NextResponse.json({ error: delFileErr.message }, { status: 500 });
       }
     }
 
-    const wsPayload = serializeWorkspaceRow(clean.metadata, body.autoSyncEnabled);
+    const wsPayload = serializeWorkspaceRow(
+      clean.metadata,
+      body.autoSyncEnabled,
+      moduleId
+    );
     const { error: wsErr } = await supabase
       .from('cuango_workspaces')
       .upsert(wsPayload, { onConflict: 'id' });
@@ -200,7 +230,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: wsErr.message }, { status: 500 });
     }
 
-    const reportRows = serializeReportFiles(clean);
+    const reportRows = serializeReportFiles(clean, moduleId);
     if (reportRows.length > 0) {
       const { error: repErr } = await supabase
         .from('cuango_report_files')
@@ -211,11 +241,12 @@ export async function POST(req: NextRequest) {
     }
 
     const allRecordRows: SupabaseFleetRecordRow[] = [
-      ...clean.records.map((r) => serializeFleetRecordRow(r, 'resumo')),
-      ...(clean.detailCycles ?? []).map((c) => serializeFleetRecordRow(c, 'lista')),
+      ...clean.records.map((r) => serializeFleetRecordRow(r, 'resumo', moduleId)),
+      ...(clean.detailCycles ?? []).map((c) =>
+        serializeFleetRecordRow(c, 'lista', moduleId)
+      ),
     ];
 
-    // Deduplicate by primary key `id` inside payload before batch upsert
     const uniqueById = new Map<string, SupabaseFleetRecordRow>();
     for (const row of allRecordRows) {
       uniqueById.set(row.id, row);
@@ -237,6 +268,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true,
       schemaReady: true,
+      moduleId,
       totalRecords: dedupedRows.length,
     });
   } catch (err) {
