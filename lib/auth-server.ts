@@ -201,8 +201,21 @@ export async function listInternalUsers(): Promise<{
     throw new Error(error.message);
   }
 
+  const remoteRows = (data ?? []) as InternalUserRow[];
+  if (remoteRows.length === 0) {
+    const localFallback = readFallbackUsers();
+    if (localFallback.length > 0) {
+      const { error: migrateErr } = await supabase
+        .from('cuango_users')
+        .upsert(localFallback, { onConflict: 'id' });
+      if (!migrateErr) {
+        return { rows: localFallback, schemaReady: true };
+      }
+    }
+  }
+
   return {
-    rows: (data ?? []) as InternalUserRow[],
+    rows: remoteRows,
     schemaReady: true,
   };
 }
@@ -444,7 +457,26 @@ export async function authenticateUser(
   identifier: string,
   password: string
 ): Promise<PublicUser> {
-  const { row } = await findUserByIdentifier(identifier);
+  const { rows, schemaReady } = await listInternalUsers();
+  if (rows.length === 0) {
+    if (!schemaReady) {
+      throw new Error(
+        'A tabela cuango_users ainda não foi criada no Supabase. Execute o script SQL de usuários no Supabase ou crie o acesso em "Primeiro Acesso".'
+      );
+    }
+    throw new Error(
+      'Nenhuma conta registada no sistema. Utilize a aba "Primeiro Acesso" para criar o administrador.'
+    );
+  }
+
+  const norm = identifier.trim().toLowerCase();
+  const row =
+    rows.find(
+      (r) =>
+        r.username.toLowerCase() === norm ||
+        (r.email && r.email.trim().toLowerCase() === norm)
+    ) ?? null;
+
   if (!row || !verifyPassword(password, row.password_hash)) {
     throw new Error('Usuário ou senha incorretos.');
   }
@@ -453,7 +485,6 @@ export async function authenticateUser(
   }
 
   const now = new Date().toISOString();
-  const { rows, schemaReady } = await listInternalUsers();
   if (!schemaReady) {
     const nextRows = rows.map((r) =>
       r.id === row.id ? { ...r, last_login_at: now, updated_at: now } : r
